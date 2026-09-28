@@ -41,6 +41,20 @@ jobs:
         continue-on-error: true
         run: make test
 
+      # Exact token-for-token agreement with mlx-lm depends on the GPU's bf16
+      # kernels, so a runner with another Apple GPU generation could differ.
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mlx-cl/models
+          key: models-smollm2-135m-instruct
+
+      - name: Tests against real model weights
+        continue-on-error: true
+        env:
+          MLX_CL_TEST_MODELS: "1"
+        run: make test
+
       - name: Build and smoke-test the CLI
         run: |
           make cli
@@ -48,3 +62,4 @@ jobs:
           bin/mlx-cl info
           bin/mlx-cl eval -l '(mx:sum (mx:arange 10))'
           bin/mlx-cl train --device cpu --steps 50
+          bin/mlx-cl generate -t 0 -n 20 -v "What is the capital of France?"

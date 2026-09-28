@@ -3,7 +3,8 @@
 (defpackage :mlx-tests
   (:use :cl :fiveam)
   (:local-nicknames (:mx :mlx) (:linalg :mlx.linalg) (:fft :mlx.fft)
-                    (:random :mlx.random) (:fast :mlx.fast) (:dist :mlx.distributed))
+                    (:random :mlx.random) (:fast :mlx.fast) (:dist :mlx.distributed)
+                    (:nn :mlx.nn) (:optim :mlx.optimizers))
   (:export #:run-tests))
 
 (in-package :mlx-tests)

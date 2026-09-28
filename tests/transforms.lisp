@@ -93,6 +93,16 @@
   ;; gradients of compiled functions
   (is (close-to (funcall (mx:grad (mx:compile #'sum-of-squares)) (mx:from-lisp '(1.0 3.0))) '(2 6))))
 
+(test functions-made-in-a-scope-outlive-it
+  ;; handles owned by returned functions must not be freed by WITH-SCOPE
+  (let ((f (mx:with-scope () (mx:compile (lambda (x) (mx:add x 1)))))
+        (g (mx:with-scope () (mx:checkpoint (lambda (x) (mx:multiply x 2)))))
+        (h (mx:with-scope () (mx:custom-vjp (lambda (x) (mx:sin x))
+                                            (lambda (p c o) (declare (ignore p o)) (list (first c)))))))
+    (is (close-to (funcall f (mx:scalar 1.0)) 2))
+    (is (close-to (funcall g (mx:scalar 1.0)) 2))
+    (is (close-to (funcall h (mx:scalar 0.0)) 0))))
+
 (test compile-control
   (mx:disable-compile)
   (is (close-to (funcall (mx:compile #'sum-of-squares) (mx:scalar 2.0)) 4))

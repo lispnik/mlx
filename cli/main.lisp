@@ -5,7 +5,7 @@
 
 (defpackage :mlx-cli
   (:use :cl)
-  (:local-nicknames (:mx :mlx) (:random :mlx.random))
+  (:local-nicknames (:mx :mlx) (:random :mlx.random) (:llm :mlx.llm))
   (:export #:main #:top-level-command))
 
 (in-package :mlx-cli)
@@ -259,6 +259,120 @@
    :handler #'train-handler))
 
 ;;; ------------------------------------------------------------------
+;;; Language models
+
+(defparameter *default-model* "HuggingFaceTB/SmolLM2-135M-Instruct")
+
+(defun model-options ()
+  (list (clingon:make-option :string :long-name "model" :short-name #\m :key :model
+                                     :description "Hugging Face repo id or local model directory"
+                                     :initial-value *default-model*)
+        (clingon:make-option :integer :long-name "max-tokens" :short-name #\n :key :max-tokens
+                                      :description "maximum tokens to generate" :initial-value 256)
+        (clingon:make-option :string :long-name "temp" :short-name #\t :key :temp
+                                     :description "sampling temperature (0 = greedy)" :initial-value "0.7")
+        (clingon:make-option :string :long-name "top-p" :key :top-p
+                                     :description "nucleus sampling threshold" :initial-value "0.9")
+        (clingon:make-option :integer :long-name "seed" :key :seed :description "random seed")
+        (clingon:make-option :string :long-name "system" :short-name #\s :key :system
+                                     :description "system prompt")
+        (clingon:make-option :flag :long-name "verbose" :short-name #\v :key :verbose
+                                   :description "report speed and memory")))
+
+(defun number-option (cmd key)
+  (let ((v (clingon:getopt cmd key)))
+    (let ((n (let ((*read-eval* nil)) (read-from-string v))))
+      (unless (realp n) (error "--~(~A~) must be a number, not ~S" key v))
+      n)))
+
+(defun load-model-reporting (cmd)
+  (let ((source (clingon:getopt cmd :model)))
+    (format *error-output* "~&Loading ~A...~%" source)
+    (llm:load-model source)))
+
+(defun generate-handler (cmd)
+  (let ((prompt (format nil "~{~A~^ ~}" (clingon:command-arguments cmd))))
+    (when (zerop (length prompt)) (clingon:print-usage-and-exit cmd *error-output*))
+    (with-mlx-errors
+      (let* ((temperature (number-option cmd :temp))
+             (top-p (number-option cmd :top-p))
+             (model (load-model-reporting cmd)))
+        (llm:generate model prompt
+                      :max-tokens (clingon:getopt cmd :max-tokens)
+                      :temperature temperature
+                      :top-p top-p
+                      :seed (clingon:getopt cmd :seed)
+                      :system (clingon:getopt cmd :system)
+                      :chat (not (clingon:getopt cmd :raw))
+                      :stream *standard-output*
+                      :verbose (clingon:getopt cmd :verbose))
+        (fresh-line)))))
+
+(defun generate-command ()
+  (clingon:make-command
+   :name "generate"
+   :description "generate text with a language model (Llama, Qwen2, Mistral families)"
+   :usage "[options] PROMPT..."
+   :options (append (model-options)
+                    (list (clingon:make-option :flag :long-name "raw" :key :raw
+                                                     :description "use the prompt as is, without the chat template")))
+   :examples '(("Ask a question:" . "mlx-cl generate 'What is the capital of France?'")
+               ("Another model, greedy:" . "mlx-cl generate -m mlx-community/Qwen2.5-0.5B-Instruct-4bit -t 0 'Write a haiku'"))
+   :handler #'generate-handler))
+
+(defun chat-handler (cmd)
+  (with-mlx-errors
+    (let* ((temperature (number-option cmd :temp))
+           (top-p (number-option cmd :top-p))
+           (model (load-model-reporting cmd))
+           (system (clingon:getopt cmd :system))
+           (history '()))
+      (format t "~&Chatting with ~A. Type /reset to start over, /quit or Ctrl-D to leave.~%"
+              (clingon:getopt cmd :model))
+      (loop
+        (format t "~&> ")
+        (force-output)
+        (let ((line (read-line *standard-input* nil)))
+          (cond ((or (null line) (string= line "/quit")) (return))
+                ((string= line "/reset") (setf history '()) (format t "(conversation cleared)~%"))
+                ((zerop (length (string-trim " " line))))
+                (t
+                 (setf history (append history (list (cons "user" line))))
+                 (let* ((tk (llm:model-tokenizer model))
+                        (messages (append (and system (list (cons "system" system))) history))
+                        (reply (llm:generate model (llm:apply-chat-template tk messages)
+                                             :chat nil
+                                             :max-tokens (clingon:getopt cmd :max-tokens)
+                                             :temperature temperature
+                                             :top-p top-p
+                                             :seed (clingon:getopt cmd :seed)
+                                             :stream *standard-output*
+                                             :verbose (clingon:getopt cmd :verbose))))
+                   (fresh-line)
+                   (setf history (append history (list (cons "assistant" reply))))))))))))
+
+(defun chat-command ()
+  (clingon:make-command
+   :name "chat"
+   :description "chat interactively with a language model"
+   :options (model-options)
+   :handler #'chat-handler))
+
+(defun download-handler (cmd)
+  (let ((repos (clingon:command-arguments cmd)))
+    (when (null repos) (clingon:print-usage-and-exit cmd *error-output*))
+    (with-mlx-errors
+      (dolist (repo repos)
+        (format t "~A~%" (uiop:native-namestring (llm:download-model repo)))))))
+
+(defun download-command ()
+  (clingon:make-command
+   :name "download"
+   :description "download Hugging Face models into the local cache (~/.cache/mlx-cl/models)"
+   :usage "REPO..."
+   :handler #'download-handler))
+
+;;; ------------------------------------------------------------------
 
 (defun top-level-command ()
   (clingon:make-command
@@ -269,7 +383,8 @@
    :license "MIT"
    :handler (lambda (cmd) (clingon:print-usage-and-exit cmd t))
    :sub-commands (list (info-command) (eval-command) (bench-command)
-                       (inspect-command) (train-command))))
+                       (inspect-command) (train-command)
+                       (generate-command) (chat-command) (download-command))))
 
 (defun main ()
   (clingon:run (top-level-command)))

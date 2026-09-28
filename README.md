@@ -7,6 +7,13 @@ of Apple's MLX array framework: lazy n-dimensional arrays on the Apple Silicon G
 and CPU, automatic differentiation, vectorization, graph compilation, custom
 Metal kernels, and safetensors/GGUF I/O.
 
+On top of that it provides:
+
+- **`mlx.nn` and `mlx.optimizers`.** Ports of Python MLX's neural-network
+  and optimizer libraries that match them numerically.
+- **`mlx/llm`.** Runs Hugging Face Llama, Qwen2 and Mistral-family models,
+  producing the same tokens as mlx-lm at the same speed.
+
 ```lisp
 (defpackage :demo (:use :cl) (:local-nicknames (:mx :mlx) (:random :mlx.random)))
 (in-package :demo)
@@ -27,7 +34,8 @@ Metal kernels, and safetensors/GGUF I/O.
 
 ```sh
 ocicl install          # cffi, trivial-garbage, fiveam, clingon (from ocicl.csv)
-make test              # FiveAM suite: 471 checks (MLX_CL_TEST_DEVICE=cpu forces the CPU)
+make test              # FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU;
+                       # MLX_CL_TEST_MODELS=1 adds tests against real model weights)
 make cli               # builds bin/mlx-cl
 ```
 
@@ -42,7 +50,9 @@ If libmlxc isn't in a standard location, set `MLX_C_LIBRARY=/path/to/libmlxc.dyl
 | `src/generated/ops.lisp` | **Generated.** 305 high-level ops as `define-op` specs, plus axis-family dispatchers |
 | `src/op.lisp` | `define-op`: argument conversion, result slots, status checking |
 | `src/*.lisp` | Hand-written layer: arrays, devices and streams, closures and transforms, I/O, kernels |
-| `tests/` | FiveAM suite |
+| `src/nn/` | `mlx.nn` and `mlx.optimizers` |
+| `src/llm/` | Tokenizer, Llama-family models, generation, Hub download (system `mlx/llm`) |
+| `tests/` | FiveAM suites (`mlx/tests`, `mlx/llm-tests`) and reference fixtures |
 | `cli/main.lisp` | clingon command-line driver |
 
 To regenerate after upgrading mlx-c, run `make generate`, or
@@ -67,6 +77,9 @@ Two guards protect against mlx-c changes:
 | `mlx.random` | `mlx.core.random` | `seed` `key` `split` `normal` `uniform` `randint` `categorical` |
 | `mlx.fast` | `mlx.core.fast` | `rms-norm` `layer-norm` `rope` `scaled-dot-product-attention` `metal-kernel` |
 | `mlx.distributed` | `mlx.core.distributed` | `init` `all-sum` `all-gather` `send` `recv` |
+| `mlx.nn` | `mlx.nn` | `module` `linear` `conv2d` `multi-head-attention` `cross-entropy` `value-and-grad` |
+| `mlx.optimizers` | `mlx.optimizers` | `adam` `adamw` `sgd` `cosine-decay` `clip-grad-norm` |
+| `mlx.llm` (system `mlx/llm`) | `mlx-lm` | `load-model` `generate` `encode` `apply-chat-template` |
 | `mlx-ffi` | the C API, 1:1 | `mlx-array-new-data` `mlx-add` ... |
 
 `mlx` **uses no packages**. Its symbols deliberately share names with CL
@@ -143,6 +156,97 @@ Python, C++ and Swift.
 `set-cache-limit`, ...), `export-to-dot` / `print-graph`, Metal capture,
 compile modes, distributed groups, and device info.
 
+## Neural networks
+
+`mlx.nn` follows Python's `mlx.nn`: a module holds named children (arrays,
+modules, or lists of them). Names follow the Python/Hugging Face convention
+(`:q-proj` means `"q_proj"`), so weight files load by name. Modules are
+funcallable.
+
+```lisp
+(nn:defmodule mlp () ())
+
+(defun make-mlp (in hidden out)
+  (let ((m (make-instance 'mlp)))
+    (nn:register m :layers (list (nn:linear in hidden) (nn:linear hidden out)))
+    m))
+
+(defmethod nn:forward ((m mlp) &rest args)
+  (destructuring-bind (l1 l2) (nn:child m :layers)
+    (funcall l2 (nn:relu (funcall l1 (first args))))))
+
+(let* ((model (make-mlp 784 256 10))
+       (opt (optim:adamw 1e-3))
+       (step (nn:value-and-grad model (lambda (x y)
+                                        (nn:cross-entropy (funcall model x) y :reduction :mean)))))
+  (dotimes (i 1000)
+    (mx:with-scope ()
+      (multiple-value-bind (loss grads) (funcall step x y)
+        (optim:update opt model grads)
+        (mx:eval (nn:parameters model) (optim:state opt))))))
+```
+
+**Layers:** `linear`, `embedding`, `conv1d`, `conv2d`, max/avg pooling,
+`layer-norm`, `rms-norm`, `group-norm`, `batch-norm`, `dropout`,
+`sequential`, `multi-head-attention`, `rope`, `prelu`, and the quantized
+`quantized-linear` / `quantized-embedding` (see `nn:quantize`).
+
+**Also:** 20 activations, 11 losses and the standard initializers. The rest
+of the module protocol is `parameters`, `trainable-parameters`, `update`,
+`freeze`, `train-mode`, `load-weights`, `save-weights` and `summary`.
+
+**Optimizers:** `sgd`, `rmsprop`, `adagrad`, `adadelta`, `adam`, `adamw`,
+`adamax` and `lion`. Schedules: `cosine-decay`, `exponential-decay`,
+`step-decay`, `linear-schedule` and `join-schedules`. Also `clip-grad-norm`.
+
+**Parity with Python MLX.** The test suite compares every activation, loss,
+optimizer and schedule against values produced by Python MLX 0.32. As in
+`mlx.nn`, activations run as shapeless-compiled (fused) kernels, which makes
+them faster and their bf16 results identical to Python's.
+
+`optim:update` frees the parameter and optimizer-state arrays it replaces,
+so memory stays flat across training steps. Arrays stored in a module,
+optimizer or cache are exempt from `with-scope` (see `mx:persist`).
+
+## Language models
+
+```lisp
+(asdf:load-system "mlx/llm")
+
+(let ((model (mlx.llm:load-model "HuggingFaceTB/SmolLM2-135M-Instruct")))
+  (mlx.llm:generate model "What is the capital of France?"
+                    :temperature 0.7 :stream *standard-output*))
+```
+
+`load-model` takes a local directory or a Hugging Face repo id. Repos are
+downloaded on first use to `~/.cache/mlx-cl/models` (`$MLX_CL_CACHE`), and
+`$HF_TOKEN` is sent for gated models. Supported model types:
+
+- `llama`, `mistral` and `qwen2`, which cover SmolLM, TinyLlama, Llama
+  3.x and Qwen2.5;
+- MLX 4- and 8-bit quantized checkpoints (e.g. from `mlx-community`);
+- Llama 3 RoPE scaling and tied embeddings.
+
+The byte-level BPE tokenizer is written from scratch. It reads
+`tokenizer.json` (GPT-2, SmolLM, Llama 3 and Qwen2 styles) and matches the
+Hugging Face `tokenizers` library token for token. Chat templates for ChatML
+and Llama 3 are rendered directly rather than through a Jinja interpreter,
+and match `apply_chat_template` for SmolLM2, Qwen2.5 and Llama 3.2.
+
+**Verified against mlx-lm:**
+
+- A full forward pass gives bit-identical logits.
+- Greedy generation gives identical tokens for SmolLM2-135M,
+  Qwen2.5-0.5B-4bit and Llama-3.2-1B-4bit.
+- Decoding speed is the same (about 250 tokens/s for SmolLM2-135M on an M3).
+
+To get there, the generation loop:
+
+- queues step *n+1* on the GPU before blocking on token *n*;
+- prefills the prompt exactly as mlx-lm does, since the schedule affects
+  bf16 rounding;
+- keeps a chunked, preallocated KV cache.
+
 ## Memory management
 
 Each MLX object is owned by a Lisp handle with a finalizer, so garbage
@@ -181,6 +285,10 @@ $ bin/mlx-cl eval --dot '(mx:exp (mx:ones (list 2)))' | dot -Tpng > graph.png
 $ bin/mlx-cl bench -n 4096 -i 20        # matmul GFLOP/s; -d cpu for the CPU
 $ bin/mlx-cl inspect model.safetensors  # tensor names, dtypes, shapes, sizes
 $ bin/mlx-cl train -s 200               # compiled value-and-grad linear regression
+$ bin/mlx-cl generate "Write a haiku about Lisp"            # SmolLM2-135M by default
+$ bin/mlx-cl generate -m mlx-community/Qwen2.5-0.5B-Instruct-4bit -t 0 -v "Explain monads"
+$ bin/mlx-cl chat -m mlx-community/Llama-3.2-1B-Instruct-4bit
+$ bin/mlx-cl download mlx-community/Qwen2.5-0.5B-Instruct-4bit
 ```
 
 ## Implementation notes

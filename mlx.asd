@@ -28,7 +28,11 @@
                (:file "export")
                (:file "kernels")
                (:file "system")
-               (:file "init"))
+               (:file "init")
+               (:file "nn/module")
+               (:file "nn/functions")
+               (:file "nn/layers")
+               (:file "nn/optimizers"))
   :in-order-to ((test-op (test-op "mlx/tests"))))
 
 (defsystem "mlx/tests"
@@ -42,12 +46,33 @@
                (:file "linalg-fft-random")
                (:file "transforms")
                (:file "io")
-               (:file "system"))
+               (:file "system")
+               (:file "nn"))
   :perform (test-op (o c) (symbol-call :mlx-tests :run-tests)))
+
+(defsystem "mlx/llm"
+  :description "Language models on MLX: Hugging Face tokenizers, Llama-family models, generation."
+  :depends-on ("mlx" "com.inuoe.jzon")
+  :pathname "src/llm/"
+  :serial t
+  :components ((:file "package")
+               (:file "tokenizer")
+               (:file "llama")
+               (:file "hub")
+               (:file "generate")))
+
+(defsystem "mlx/llm-tests"
+  :description "FiveAM tests for mlx/llm."
+  :depends-on ("mlx/llm" "fiveam")
+  :pathname "tests/"
+  :components ((:static-file "fixtures/pretokenize.sexp")
+               (:static-file "fixtures/smollm.sexp")
+               (:file "llm"))
+  :perform (test-op (o c) (symbol-call :mlx-llm-tests :run-tests)))
 
 (defsystem "mlx/cli"
   :description "Command-line driver for mlx, built with clingon."
-  :depends-on ("mlx" "clingon")
+  :depends-on ("mlx" "mlx/llm" "clingon")
   :pathname "cli/"
   :serial t
   :components ((:file "main"))

@@ -46,7 +46,7 @@ with CL (MAX, SUM, EVAL, LOAD, COMPILE...).  Use a package-local nickname.")
      '#:mlx-array '#:mlx-array-p '#:mlx-stream '#:mlx-stream-p '#:mlx-device '#:mlx-device-p
      '#:mlx-error '#:mlx-error-message
      ;; lifetime
-     '#:free '#:freed-p '#:with-scope '#:keep
+     '#:free '#:freed-p '#:with-scope '#:keep '#:persist
      ;; construction and conversion
      '#:from-lisp '#:to-lisp '#:item '#:scalar '#:ensure-array '#:dtypes
      '#:arange '#:pad '#:split '#:tensordot
@@ -107,11 +107,52 @@ with CL (MAX, SUM, EVAL, LOAD, COMPILE...).  Use a package-local nickname.")
   #.(mlx.build:exports "MLX.DISTRIBUTED"
                        '#:available-p '#:init '#:group-rank '#:group-size '#:group-split))
 
+(defpackage :mlx.nn
+  (:use)
+  (:documentation "Neural networks (mlx.nn): modules, layers, activations,
+losses and initializers.")
+  (:export
+   ;; module protocol
+   #:module #:defmodule #:forward #:child #:children #:register #:modules
+   #:parameters #:trainable-parameters #:update #:flatten-parameters #:parameter-count
+   #:freeze #:unfreeze #:train-mode #:training-p #:apply-to-modules
+   #:load-weights #:save-weights #:value-and-grad #:summary
+   ;; layers
+   #:linear #:embedding #:as-linear #:layer-norm #:rms-norm #:group-norm #:batch-norm
+   #:dropout #:conv1d #:conv2d #:max-pool-1d #:max-pool-2d #:avg-pool-1d #:avg-pool-2d
+   #:sequential #:identity #:prelu #:multi-head-attention #:create-additive-causal-mask
+   #:rope #:quantized-linear #:quantized-embedding #:quantize
+   ;; activations
+   #:relu #:relu6 #:leaky-relu #:elu #:selu #:celu #:gelu #:gelu-approx #:gelu-fast-approx
+   #:silu #:mish #:softplus #:softsign #:log-sigmoid #:hardswish #:hard-tanh
+   #:sigmoid #:tanh #:softmax #:log-softmax #:glu #:step
+   ;; losses
+   #:cross-entropy #:binary-cross-entropy #:nll-loss #:mse-loss #:l1-loss #:smooth-l1-loss
+   #:huber-loss #:kl-div-loss #:log-cosh-loss #:cosine-similarity-loss #:hinge-loss
+   ;; initializers
+   #:init-constant #:init-normal #:init-uniform #:init-identity
+   #:glorot-normal #:glorot-uniform #:he-normal #:he-uniform))
+
+(defpackage :mlx.optimizers
+  (:use)
+  (:documentation "Optimizers, learning-rate schedules and gradient clipping (mlx.optimizers).")
+  (:export
+   #:optimizer #:update #:apply-gradients #:learning-rate #:state #:step-count #:reset
+   #:sgd #:rmsprop #:adagrad #:adadelta #:adam #:adamw #:adamax #:lion
+   #:exponential-decay #:step-decay #:cosine-decay #:linear-schedule #:join-schedules
+   #:clip-grad-norm))
+
 (defpackage :mlx.impl
   (:use :cl)
   (:local-nicknames (:ffi :mlx-ffi) (:tg :trivial-garbage)))
 
+(defpackage :mlx.nn.impl
+  (:use :cl)
+  (:local-nicknames (:mx :mlx) (:nn :mlx.nn) (:optim :mlx.optimizers)
+                    (:random :mlx.random) (:fast :mlx.fast) (:impl :mlx.impl)))
+
 (defpackage :mlx-user
   (:use :cl)
   (:local-nicknames (:mx :mlx) (:linalg :mlx.linalg) (:fft :mlx.fft)
-                    (:random :mlx.random) (:fast :mlx.fast)))
+                    (:random :mlx.random) (:fast :mlx.fast)
+                    (:nn :mlx.nn) (:optim :mlx.optimizers)))

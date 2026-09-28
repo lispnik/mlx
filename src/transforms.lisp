@@ -161,6 +161,8 @@ take only arrays (or trees of arrays); numbers become array inputs."
                                    (ffi:mlx-closure-free p)
                                    (ffi:mlx-detail-compile-erase fun-id))))))
     (register-handle handle)
+    ;; owned by the returned function, whatever scope we are in
+    (mlx:persist handle (tree-closure-closure tc))
     (tree-closure-caller tc handle)))
 
 (defun mlx:checkpoint (function)
@@ -169,7 +171,9 @@ recomputed during the backward pass instead of being stored."
   (let ((tc (make-tree-closure function)))
     (with-out-slots (res)
       (check (ffi:mlx-checkpoint res (ptr (tree-closure-closure tc))) "checkpoint")
-      (tree-closure-caller tc (%wrap-mlx-closure (cffi:mem-ref res :pointer))))))
+      (let ((handle (%wrap-mlx-closure (cffi:mem-ref res :pointer))))
+        (mlx:persist handle (tree-closure-closure tc))
+        (tree-closure-caller tc handle)))))
 
 (defun mlx:custom-function (function &key vjp jvp vmap)
   "Return FUNCTION with custom transformation rules:
@@ -186,7 +190,9 @@ All arguments are lists of arrays."
         (check (ffi:mlx-custom-function res (ptr (tree-closure-closure tc))
                                         (p vjp-c) (p jvp-c) (p vmap-c))
                "custom-function")
-        (tree-closure-caller tc (%wrap-mlx-closure (cffi:mem-ref res :pointer)))))))
+        (let ((handle (%wrap-mlx-closure (cffi:mem-ref res :pointer))))
+          (mlx:persist handle (tree-closure-closure tc) vjp-c jvp-c vmap-c)
+          (tree-closure-caller tc handle))))))
 
 (defun mlx:custom-vjp (function vjp)
   "FUNCTION with the custom vector-Jacobian product VJP; see CUSTOM-FUNCTION."

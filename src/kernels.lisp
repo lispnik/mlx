@@ -36,12 +36,13 @@ OUTPUT-NAMES.  Returns a function taking keyword arguments
   :STREAM
 
 and returning the list of output arrays."
-  (let ((kernel (with-vector-string (ins input-names)
+  (let ((kernel (mlx:persist
+                 (with-vector-string (ins input-names)
                   (with-vector-string (outs output-names)
                     (%wrap-mlx-metal-kernel
                      (without-float-traps
                        (ffi:mlx-fast-metal-kernel-new name ins outs source header
-                                                      ensure-row-contiguous atomic-outputs)))))))
+                                                      ensure-row-contiguous atomic-outputs))))))))
     (lambda (&key inputs output-shapes output-dtypes (grid '(1 1 1)) (threadgroup '(1 1 1))
                template init-value verbose stream)
       (let ((config (ffi:mlx-fast-metal-kernel-config-new)))

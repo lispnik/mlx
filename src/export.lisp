@@ -57,7 +57,7 @@ Returns a Lisp function of arrays (optionally followed by keyword
 arguments) that returns the list of output arrays."
   (let ((p (without-float-traps (ffi:mlx-imported-function-new (native-file file)))))
     (when (cffi:null-pointer-p p) (signal-mlx-error "import-function"))
-    (let ((handle (%wrap-mlx-imported-function p)))
+    (let ((handle (mlx:persist (%wrap-mlx-imported-function p))))
       (lambda (&rest args)
         (multiple-value-bind (positional kwargs) (split-kwargs args)
           (with-vector-array (in positional)

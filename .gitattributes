@@ -1,0 +1,2 @@
+# Test fixtures hold exact text, including \r\n inside strings: never convert.
+tests/fixtures/** -text

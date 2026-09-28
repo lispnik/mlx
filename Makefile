@@ -16,9 +16,12 @@ generate:        ## regenerate bindings from the installed mlx-c headers
 check-generated: ## fail if the generated files are stale for the installed headers
 	$(SBCL) --script tools/generate.lisp --check $(MLX_C_INCLUDE)
 
-test:            ## run the FiveAM suite (MLX_CL_TEST_DEVICE=cpu to force the CPU)
+test:            ## run the FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU;
+                 ## MLX_CL_TEST_MODELS=1 adds tests against real model weights)
 	$(LISP) --eval '(asdf:load-system "mlx/tests")' \
 	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-tests :run-tests) 0 1))'
+	$(LISP) --eval '(asdf:load-system "mlx/llm-tests")' \
+	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-llm-tests :run-tests) 0 1))'
 
 cli: bin/mlx-cl  ## build the command-line driver
 

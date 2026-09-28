@@ -109,6 +109,19 @@ scope, if any).  Returns the first handle."
       (dolist (h moved) (hand-to-scope h (cdr *scope*)))))
   (first handles))
 
+(defun mlx:persist (&rest handles)
+  "Exempt HANDLES (or trees of them) from every enclosing WITH-SCOPE: they
+live until freed explicitly or garbage collected.  For arrays stored in
+long-lived objects -- model parameters, caches, optimizer state.  Returns
+the first handle."
+  (let* ((hs (collect-handles handles))
+         (in-hs (handle-set hs)))
+    (loop for scope = *scope* then (cdr scope)
+          while scope
+          do (setf (car scope) (delete-if in-hs (car scope))))
+    (mapc #'attach-finalizer hs))
+  (first handles))
+
 (defun collect-handles (tree)
   (let ((out '()))
     (labels ((walk (x)

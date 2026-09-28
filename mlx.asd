@@ -29,6 +29,7 @@
                (:file "kernels")
                (:file "system")
                (:file "init")
+               (:file "syntax")
                (:file "nn/module")
                (:file "nn/functions")
                (:file "nn/layers")

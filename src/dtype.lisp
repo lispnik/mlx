@@ -60,23 +60,29 @@ through float32 when moving data between Lisp and MLX.")
         (t nil)))
 
 (defun infer-dtype (elements)
-  "Dtype for a sequence of Lisp scalars, following MLX/NumPy defaults:
-booleans -> bool, integers -> int32 (int64 if needed), reals -> float32,
-complexes -> complex64."
-  (let ((kind :bool) (big nil))
-    (map nil (lambda (x)
-               (etypecase x
-                 ((member t nil))
-                 (integer (when (eq kind :bool) (setf kind :int))
-                          (unless (typep x '(signed-byte 32)) (setf big t)))
-                 (real (unless (eq kind :complex) (setf kind :float)))
-                 (complex (setf kind :complex))))
-         elements)
-    (ecase kind
-      (:bool (if (zerop (length elements)) :float32 :bool))
-      (:int (if big :int64 :int32))
-      (:float :float32)
-      (:complex :complex64))))
+  "Dtype for the simple-vector of Lisp scalars ELEMENTS, following MLX/NumPy
+defaults: booleans -> bool, integers -> int32 (int64 if needed), reals ->
+float32, complexes -> complex64."
+  (declare (type simple-vector elements) (optimize speed))
+  ;; kind: 0 bool, 1 integer, 2 real, 3 complex
+  (let ((kind 0) (big nil))
+    (declare (type (integer 0 3) kind))
+    (dotimes (i (length elements))
+      (let ((x (svref elements i)))
+        (typecase x
+          (fixnum (when (< kind 1) (setf kind 1))
+                  (unless (typep x '(signed-byte 32)) (setf big t)))
+          (float (when (< kind 2) (setf kind 2)))
+          (integer (when (< kind 1) (setf kind 1)) (setf big t))
+          (rational (when (< kind 2) (setf kind 2)))
+          (complex (setf kind 3))
+          (t (unless (or (eq x t) (null x))
+               (error "Cannot put ~S in an MLX array." x))))))
+    (case kind
+      (0 (if (zerop (length elements)) :float32 :bool))
+      (1 (if big :int64 :int32))
+      (2 :float32)
+      (t :complex64))))
 
 (defun scalar-dtype (x)
   (etypecase x

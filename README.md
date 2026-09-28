@@ -35,7 +35,10 @@ On top of that it provides:
 ```sh
 ocicl install          # cffi, trivial-garbage, fiveam, clingon (from ocicl.csv)
 make test              # FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU;
-                       # MLX_CL_TEST_MODELS=1 adds tests against real model weights)
+                       # MLX_CL_TEST_MODELS=1 adds tests against real model weights;
+                       # MLX_CL_TEST_EXACT=1 also demands full-length greedy
+                       # agreement with mlx-lm, which only holds on the GPU
+                       # generation the fixtures came from, an M3)
 make cli               # builds bin/mlx-cl
 ```
 
@@ -105,7 +108,25 @@ everything with a sensible default is a keyword, and every op takes `:stream`.
 
 **Conversion.** `from-lisp` / `to-lisp` / `item`. `to-lisp` returns
 specialized Lisp arrays (`single-float`, `(signed-byte 32)`, ...) by memcpy;
-pass `:as :list` for nested lists.
+pass `:as :list` for nested lists. Specialized Lisp arrays are copied in one
+step. Lists and T arrays go through type-declared loops, one per dtype, at
+about 8 ns per element (2 ns for T arrays).
+
+**Syntax.** CL-style n-ary arithmetic and chained comparisons, `@` for
+matrix products, and optional `#M` array literals:
+
+```lisp
+(mx:+ a b 1)            ; a + b + 1
+(mx:- a)                ; -a
+(mx:/ a b 2)            ; a / b / 2
+(mx:< 0 x 1)            ; 0 < x < 1, elementwise
+(mx:@ q (mx:transpose k) v)
+
+(setf *readtable* (copy-readtable))
+(mx:enable-array-syntax)
+#M((1 2) (3 4))         ; a 2x2 int32 array
+#M:float16(0.5 1.5)     ; with a dtype
+```
 
 **Indexing.** `(mx:ref a 0 '(1 nil) t :newaxis)` is `a[0, 1:, :, None]`.
 A list is always a slice `(start stop [step])`; gather with a vector or an

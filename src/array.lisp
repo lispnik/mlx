@@ -63,32 +63,47 @@ output length of an inverse real FFT."
   (and x (typep x 'sequence) (not (stringp x))))
 
 (defun nested-shape (data)
-  "Shape of nested lists/vectors DATA (validated as rectangular)."
-  (labels ((shape (x)
-             (if (subsequencep x)
-                 (let* ((n (length x))
-                        (sub (if (zerop n) '() (shape (elt x 0)))))
-                   (map nil (lambda (e)
-                              (unless (equal (shape e) sub)
-                                (error "Ragged nested sequence: ~S" data)))
-                        x)
-                   (cons n sub))
-                 '())))
-    (shape data)))
+  "Shape of the nested lists/vectors DATA, read along first elements.
+COLLECT-LEAVES checks that the rest agrees."
+  (let ((shape '()) (x data))
+    (loop while (subsequencep x)
+          do (let ((n (length x)))
+               (push n shape)
+               (when (zerop n) (return))
+               (setf x (elt x 0))))
+    (nreverse shape)))
 
-(defun flatten-nested (data)
-  (let ((out (make-array 16 :adjustable t :fill-pointer 0)))
-    (labels ((walk (x)
-               (if (subsequencep x)
-                   (map nil #'walk x)
-                   (vector-push-extend x out))))
-      (walk data))
+(defun collect-leaves (data shape)
+  "The leaves of DATA in row-major order as a simple-vector, signalling an
+error unless DATA is rectangular with SHAPE."
+  (let ((out (make-array (reduce #'* shape)))
+        (i 0))
+    (declare (type simple-vector out) (type fixnum i))
+    (labels ((ragged () (error "Ragged nested sequence: ~S" data))
+             (walk (x dims)
+               (cond ((null dims)
+                      (when (subsequencep x) (ragged))
+                      (setf (svref out i) x)
+                      (incf i))
+                     ((not (or (subsequencep x) (and (null x) (zerop (first dims))))) (ragged))
+                     ((listp x)
+                      (let ((count 0))
+                        (declare (type fixnum count))
+                        (dolist (e x) (walk e (rest dims)) (incf count))
+                        (unless (= count (first dims)) (ragged))))
+                     (t (unless (= (length x) (first dims)) (ragged))
+                        (loop for e across x do (walk e (rest dims)))))))
+      (walk data shape))
     out))
 
 (defun array-row-major-elements (array)
-  (let ((v (make-array (array-total-size array))))
-    (dotimes (i (length v) v)
-      (setf (aref v i) (row-major-aref array i)))))
+  "ARRAY's elements as a simple-vector (shared, not copied, when ARRAY is a
+simple T array)."
+  (if (and (typep array '(simple-array t *)))
+      (sb-ext:array-storage-vector array)
+      (let ((v (make-array (array-total-size array))))
+        (dotimes (i (length v) v)
+          (setf (svref v i) (row-major-aref array i))))))
 
 (defun convert-element (x dtype)
   (ecase (dtype-kind dtype)
@@ -122,21 +137,60 @@ output length of an inverse real FFT."
     (:float32 'single-float) (:float64 'double-float)
     (:complex64 '(complex single-float))))
 
+(declaim (inline to-single to-double to-integer to-bool-byte))
+(defun to-single (x)
+  (typecase x
+    (single-float x)
+    (real (float x 1f0))
+    (t (if (eq x t) 1f0 (if (null x) 0f0 (error "Cannot store ~S in a float array." x))))))
+(defun to-double (x)
+  (typecase x
+    (double-float x)
+    (real (float x 1d0))
+    (t (if (eq x t) 1d0 (if (null x) 0d0 (error "Cannot store ~S in a float array." x))))))
+(defun to-integer (x)
+  (typecase x
+    (integer x)
+    (t (cond ((eq x t) 1) ((null x) 0)
+             (t (error "Cannot store non-integer ~S in an integer array." x))))))
+(defun to-bool-byte (x)
+  (if (or (null x) (and (numberp x) (zerop x))) 0 1))
+
+(defun staged-buffer (elements dtype)
+  "A specialized Lisp vector holding ELEMENTS (a simple-vector) converted
+to DTYPE, laid out as MLX expects.  One tight, type-declared loop per dtype."
+  (declare (type simple-vector elements) (optimize speed))
+  (let ((n (length elements)))
+    (macrolet ((fill-as (element-type convert)
+                 `(let ((buffer (make-array (max n 1) :element-type ',element-type)))
+                    (dotimes (i n buffer)
+                      (setf (aref buffer i) (,convert (svref elements i)))))))
+      (ecase dtype
+        (:float32 (fill-as single-float to-single))
+        (:float64 (fill-as double-float to-double))
+        (:int32 (fill-as (signed-byte 32) to-integer))
+        (:int64 (fill-as (signed-byte 64) to-integer))
+        (:int16 (fill-as (signed-byte 16) to-integer))
+        (:int8 (fill-as (signed-byte 8) to-integer))
+        (:uint8 (fill-as (unsigned-byte 8) to-integer))
+        (:uint16 (fill-as (unsigned-byte 16) to-integer))
+        (:uint32 (fill-as (unsigned-byte 32) to-integer))
+        (:uint64 (fill-as (unsigned-byte 64) to-integer))
+        (:bool (fill-as (unsigned-byte 8) to-bool-byte))  ; C bool is one byte
+        (:complex64 (let ((buffer (make-array (max n 1) :element-type '(complex single-float))))
+                      (dotimes (i n buffer)
+                        (setf (aref buffer i) (coerce (svref elements i) '(complex single-float))))))))))
+
 (defun elements->pointer (elements shape dtype)
-  "Raw mlx_array pointer holding ELEMENTS (a vector, row-major) as DTYPE.
-The data is staged in a specialized Lisp vector and passed by address, which
-avoids per-element foreign type dispatch."
+  "Raw mlx_array pointer holding ELEMENTS (a simple-vector, row-major) as
+DTYPE.  The data is staged in a specialized Lisp vector passed by address."
   (case dtype
     ((:float16 :bfloat16)
      (let ((f32 (elements->pointer elements shape :float32)))
        (unwind-protect (steal-pointer (mlx:astype (%wrap-mlx-array-unregistered f32) dtype))
          (ffi:mlx-array-free f32))))
     (t
-     (let* ((n (length elements))
-            (buffer (make-array (max n 1) :element-type (lisp-buffer-type dtype))))
-       (if (eq dtype :bool)
-           (dotimes (i n) (setf (aref buffer i) (if (convert-element (aref elements i) :bool) 1 0)))
-           (dotimes (i n) (setf (aref buffer i) (convert-element (aref elements i) dtype))))
+     (let ((buffer (staged-buffer (coerce elements 'simple-vector) (check-dtype dtype))))
        (cffi:with-pointer-to-vector-data (buf buffer)
          (new-data-pointer buf shape dtype))))))
 
@@ -181,6 +235,11 @@ must free POINTER itself."
             (new-data-pointer buf shape dtype)))
         (elements->pointer (array-row-major-elements array) shape dtype))))
 
+(defun nested->pointer (data dtype)
+  (let* ((shape (nested-shape data))
+         (leaves (collect-leaves data shape)))
+    (elements->pointer leaves shape (or dtype (infer-dtype leaves)))))
+
 (defun %from-lisp (data dtype)
   "Raw mlx_array pointer for Lisp DATA (the caller owns it)."
   (etypecase data
@@ -193,14 +252,12 @@ must free POINTER itself."
                            (check (ffi:mlx-array-set slot p))
                            (cffi:mem-ref slot :pointer)))))
     (null (elements->pointer #() '(0) (or dtype :float32)))
-    (list (let ((flat (flatten-nested data)))
-            (elements->pointer flat (nested-shape data) (or dtype (infer-dtype flat)))))
+    (list (nested->pointer data dtype))
     ((or number (eql t))
      (scalar->pointer data (or dtype (scalar-dtype data))))
     (string (error "Cannot make an MLX array from the string ~S." data))
-    (vector (if (some #'subsequencep data)
-                (let ((flat (flatten-nested data)))
-                  (elements->pointer flat (nested-shape data) (or dtype (infer-dtype flat))))
+    (vector (if (and (eq (array-element-type data) t) (some #'subsequencep data))
+                (nested->pointer data dtype)
                 (lisp-array->pointer data dtype)))
     (array (lisp-array->pointer data dtype))))
 

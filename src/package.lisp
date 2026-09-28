@@ -79,6 +79,9 @@ with CL (MAX, SUM, EVAL, LOAD, COMPILE...).  Use a package-local nickname.")
      '#:active-memory '#:cache-memory '#:peak-memory '#:reset-peak-memory
      '#:memory-limit '#:set-memory-limit '#:set-cache-limit '#:set-wired-limit '#:clear-cache
      '#:export-to-dot '#:print-graph
+     ;; syntax
+     '#:+ '#:- '#:* '#:/ '#:@ '#:< '#:> '#:<= '#:>= '#:= '#:/=
+     '#:enable-array-syntax '#:disable-array-syntax
      '#:reinitialize))
 
 (defpackage :mlx.linalg

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # weekly: catches a new mlx-c bottle that changes the headers or ABI
+    - cron: "17 6 * * 1"
+
+jobs:
+  test:
+    # MLX needs Apple Silicon; the bindings assume the arm64 calling convention
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL, mlx-c and ocicl
+        run: |
+          brew install sbcl mlx-c ocicl
+          sbcl --version
+          brew list --versions mlx-c
+
+      - name: Set up ocicl and fetch dependencies
+        run: |
+          ocicl setup > ~/.sbclrc
+          ocicl install
+
+      - name: Generated bindings match the installed mlx-c headers
+        run: make check-generated
+
+      - name: Tests (CPU)
+        env:
+          MLX_CL_TEST_DEVICE: cpu
+        run: make test
+
+      # Hosted runners are VMs whose Metal support varies, so GPU results
+      # are reported but don't gate the build.
+      - name: Tests (default device, GPU when available)
+        continue-on-error: true
+        run: make test
+
+      - name: Build and smoke-test the CLI
+        run: |
+          make cli
+          bin/mlx-cl --version
+          bin/mlx-cl info
+          bin/mlx-cl eval -l '(mx:sum (mx:arange 10))'
+          bin/mlx-cl train --device cpu --steps 50

@@ -1,0 +1,30 @@
+# Makefile for mlx (Common Lisp bindings to mlx-c)
+
+SBCL ?= sbcl
+LISP = $(SBCL) --noinform --non-interactive
+
+.PHONY: all deps generate check-generated test cli clean
+
+all: cli
+
+deps:            ## fetch dependencies into ./ocicl
+	ocicl install
+
+generate:        ## regenerate bindings from the installed mlx-c headers
+	$(SBCL) --script tools/generate.lisp $(MLX_C_INCLUDE)
+
+check-generated: ## fail if the generated files are stale for the installed headers
+	$(SBCL) --script tools/generate.lisp --check $(MLX_C_INCLUDE)
+
+test:            ## run the FiveAM suite (MLX_CL_TEST_DEVICE=cpu to force the CPU)
+	$(LISP) --eval '(asdf:load-system "mlx/tests")' \
+	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-tests :run-tests) 0 1))'
+
+cli: bin/mlx-cl  ## build the command-line driver
+
+bin/mlx-cl: mlx.asd src/*.lisp src/*/*.lisp cli/*.lisp
+	$(LISP) --eval '(asdf:make "mlx/cli")'
+
+clean:
+	rm -rf bin
+	find . -name '*.fasl' -not -path './ocicl/*' -delete

@@ -311,13 +311,13 @@
 (defun generate-command ()
   (clingon:make-command
    :name "generate"
-   :description "generate text with a language model (Llama, Qwen2, Mistral families)"
+   :description "generate text with a language model (Llama, Qwen2, Mistral, Phi-3, Gemma 2/3)"
    :usage "[options] PROMPT..."
    :options (append (model-options)
                     (list (clingon:make-option :flag :long-name "raw" :key :raw
                                                      :description "use the prompt as is, without the chat template")))
    :examples '(("Ask a question:" . "mlx-cl generate 'What is the capital of France?'")
-               ("Another model, greedy:" . "mlx-cl generate -m mlx-community/Qwen2.5-0.5B-Instruct-4bit -t 0 'Write a haiku'"))
+               ("Another model, greedy:" . "mlx-cl generate -m mlx-community/gemma-3-1b-it-4bit -t 0 'Write a haiku'"))
    :handler #'generate-handler))
 
 (defun chat-handler (cmd)

@@ -44,7 +44,8 @@ The marker may be written with a real newline or a \\n escape."
 
 (defun apply-chat-template (tokenizer messages &key (add-generation-prompt t))
   "Render MESSAGES -- a list of (role . content), roles \"system\", \"user\"
-or \"assistant\" -- as the model's chat prompt string."
+or \"assistant\" -- as the model's chat prompt string.  ChatML (SmolLM,
+Qwen), Llama 3, Gemma and Phi-3 formats are recognised."
   (let ((template (or (tokenizer-chat-template tokenizer) "")))
     (cond
       ((search "<|im_start|>" template)
@@ -69,6 +70,28 @@ or \"assistant\" -- as the model's chat prompt string."
          (loop for (role . content) in messages
                do (format s "<|start_header_id|>~A<|end_header_id|>~%~%~A<|eot_id|>" role content))
          (when add-generation-prompt (format s "<|start_header_id|>assistant<|end_header_id|>~%~%"))))
+      ((search "<start_of_turn>" template)
+       ;; Gemma: the system prompt (if the template allows one) prefixes the
+       ;; first user turn; assistant turns are "model"; content is trimmed
+       (let* ((system (and (equal (car (first messages)) "system") (cdr (pop messages)))))
+         (when (and system (search "System role not supported" template))
+           (error "This model's chat template does not support a system prompt."))
+         (with-output-to-string (s)
+           (write-string (or (bos-string tokenizer) "") s)
+           (loop for (role . content) in messages
+                 for first = t then nil
+                 do (format s "<start_of_turn>~A~%~@[~A~%~%~]~A<end_of_turn>~%"
+                            (if (equal role "assistant") "model" role)
+                            (and first system)
+                            (string-trim '(#\Space #\Tab #\Newline #\Return) content)))
+           (when add-generation-prompt (format s "<start_of_turn>model~%")))))
+      ((search "<|end|>" template)
+       ;; Phi-3
+       (with-output-to-string (s)
+         (loop for (role . content) in messages
+               unless (and (equal role "system") (zerop (length content)))
+                 do (format s "<|~A|>~%~A<|end|>~%" role content))
+         (when add-generation-prompt (format s "<|assistant|>~%"))))
       (t (error "Unrecognised chat template; use a raw prompt.")))))
 
 ;;; ------------------------------------------------------------------
@@ -148,6 +171,13 @@ previous token, overlapping Lisp work with the GPU."
     (values count prompt-time
             (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
 
+(defun add-bos-p (tokenizer text)
+  "Whether to prepend BOS to TEXT: the tokenizer asks for it and the text
+(e.g. from a chat template) does not already start with it."
+  (and (bos-token tokenizer)
+       (not (and (bos-string tokenizer)
+                 (eql 0 (search (bos-string tokenizer) text))))))
+
 (defun generate (model prompt &key (max-tokens 256) (temperature 0.0) (top-p 1.0) seed
                                    (chat t) system stream (verbose nil))
   "Generate text from MODEL (from LOAD-MODEL) for PROMPT.  With CHAT (the
@@ -160,8 +190,7 @@ VERBOSE, timing is reported on *ERROR-OUTPUT*.  Returns the generated text."
                    (apply-chat-template tokenizer (append (and system (list (cons "system" system)))
                                                           (list (cons "user" prompt))))
                    prompt))
-         (ids (encode tokenizer text :add-bos (and (bos-token tokenizer)
-                                                   (not (search "<|begin_of_text|>" text)))))
+         (ids (encode tokenizer text :add-bos (add-bos-p tokenizer text)))
          (decoder (make-stream-decoder tokenizer))
          (out (make-string-output-stream)))
     (when seed (random:seed seed))

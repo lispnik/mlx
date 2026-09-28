@@ -96,6 +96,86 @@ You are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>
       (is (search (format nil "<|start_header_id|>user<|end_header_id|>~%~%Hi<|eot_id|>") text)))
     (signals error (llm:apply-chat-template unknown '(("user" . "Hi"))))))
 
+;;; SentencePiece-style tokenizers (Gemma, Phi-3, Llama 2), built by hand
+
+(defun spm-tokenizer (&key strip prepend (specials '()))
+  "A tiny SentencePiece BPE tokenizer: characters, a few merges, byte
+fallback for everything else."
+  (let* ((tokens (append '("<unk>" "▁" "h" "e" "l" "o" "w" "r" "d" "he" "ll" "hell" "hello" "▁hello"
+                           "▁w" "or" "▁wor" "▁world")
+                         (loop for b below 256 collect (format nil "<0x~2,'0X>" b))
+                         (mapcar #'first specials)))
+         (vocab (make-hash-table :test 'equal))
+         (ranks (make-hash-table :test 'equal)))
+    (loop for tok in tokens for i from 0 do (setf (gethash tok vocab) i))
+    (loop for (a b) in '(("h" "e") ("l" "l") ("he" "ll") ("hell" "o") ("▁" "hello") ("▁" "w")
+                         ("o" "r") ("▁w" "or") ("▁wor" "l") ("▁worl" "d"))
+          for rank from 0
+          do (setf (gethash (mlx.llm::merge-key a b) ranks) rank))
+    (setf (gethash (mlx.llm::merge-key "▁wor" "l") ranks) 8
+          (gethash "▁worl" vocab) (length tokens))
+    (let ((id->token (make-array (1+ (hash-table-count vocab)))))
+      (maphash (lambda (k v) (setf (aref id->token v) k)) vocab)
+      (make-instance 'llm:tokenizer
+                     :vocab vocab :id->token id->token :ranks ranks
+                     :special (loop for (content . flags) in specials
+                                    collect (mlx.llm::make-added content (gethash content vocab)
+                                                                 :lstrip (getf flags :lstrip)
+                                                                 :rstrip (getf flags :rstrip)))
+                     :special-ids (let ((h (make-hash-table)))
+                                    (dolist (sp specials h) (setf (gethash (gethash (first sp) vocab) h) t)))
+                     :byte-level nil :byte-fallback t :unk-id 0
+                     :normalizer (lambda (text)
+                                   (let ((text (substitute (code-char #x2581) #\Space text)))
+                                     (if (and prepend (plusp (length text)))
+                                         (concatenate 'string "▁" text)
+                                         text)))
+                     :strip-leading-space strip))))
+
+(test sentencepiece-encoding
+  (let ((tk (spm-tokenizer)))
+    (flet ((toks (text) (mapcar (lambda (id) (aref (slot-value tk 'mlx.llm::id->token) id))
+                                (llm:encode tk text))))
+      (is (equal '("hello" "▁world") (toks "hello world")))
+      ;; characters outside the vocabulary fall back to their UTF-8 bytes
+      (is (equal '("hello" "<0xC3>" "<0xA9>") (toks "helloé")))
+      (is (string= "hello world" (llm:decode tk (llm:encode tk "hello world"))))
+      (is (string= "helloé" (llm:decode tk (llm:encode tk "helloé")))))
+    ;; Phi-3/Llama 2 style: prepend ▁, strip one leading space when decoding
+    (let ((phi (spm-tokenizer :prepend t :strip t)))
+      (is (equal (llm:encode phi "hello") (list (llm:token-id phi "▁hello"))))
+      (is (string= "hello world" (llm:decode phi (llm:encode phi "hello world"))))
+      (let ((decoder (llm:make-stream-decoder phi)))
+        (is (equal '("hello" " world")
+                   (mapcar (lambda (id) (llm:decode-step decoder id)) (llm:encode phi "hello world"))))))))
+
+(test added-tokens-strip-whitespace
+  (let ((tk (spm-tokenizer :specials '(("<|a|>" :rstrip t) ("<|b|>" :lstrip t) ("<|c|>")))))
+    (flet ((parts (text) (mlx.llm::split-special tk text)))
+      (is (equal (list (llm:token-id tk "<|a|>") "hello") (parts (format nil "<|a|>  ~%hello"))))
+      (is (equal (list "hello" (llm:token-id tk "<|b|>")) (parts "hello   <|b|>")))
+      (is (equal (list "hello " (llm:token-id tk "<|c|>") " world") (parts "hello <|c|> world"))))))
+
+(test split-and-metaspace-pre-tokenizers
+  (is (equal '("a▁" "b▁" "c") (mlx.llm::split-on-string "a▁b▁c" "▁" :merged-with-previous)))
+  (is (equal '("a" "▁b" "▁c") (mlx.llm::split-on-string "a▁b▁c" "▁" :merged-with-next)))
+  (is (equal '("a" "▁" "b") (mlx.llm::split-on-string "a▁b" "▁" :isolated)))
+  (is (equal '("a" "b") (mlx.llm::split-on-string "a▁b" "▁" :removed)))
+  (let ((ms (code-char #x2581)))
+    (is (equal (list (format nil "~Chello" ms) (format nil "~Cworld" ms))
+               (mlx.llm::metaspace "hello world" ms :always t t)))
+    (is (equal (list (format nil "hello~Cworld" ms))
+               (mlx.llm::metaspace "hello world" ms :first nil nil)))))
+
+(test bpe-merge-by-rank
+  ;; lowest rank first, all occurrences, adjacent pairs recomputed
+  (let ((ranks (make-hash-table :test 'equal)))
+    (loop for (a b) in '(("a" "b") ("ab" "ab") ("c" "d")) for r from 0
+          do (setf (gethash (mlx.llm::merge-key a b) ranks) r))
+    (is (equal '("abab" "cd" "a") (mlx.llm::bpe-merge ranks '("a" "b" "a" "b" "c" "d" "a"))))
+    (is (equal '("x") (mlx.llm::bpe-merge ranks '("x"))))
+    (is (= 2000 (length (mlx.llm::bpe-merge ranks (make-list 2000 :initial-element "z")))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Model mechanics on a tiny random Llama (no download)
 
@@ -125,7 +205,7 @@ followed by single-token steps through the cache."
 
 (test kv-cache-matches-full-forward
   (random:seed 0)
-  (let* ((model (mlx.llm::make-llama (tiny-config)))
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config)))
          (tokens (loop repeat 20 collect (random 97))))
     (multiple-value-bind (diff offset) (incremental-matches-full-p model tokens 7)
       (is (< diff 1e-4) "incremental decoding differs from a full pass by ~A" diff)
@@ -134,7 +214,7 @@ followed by single-token steps through the cache."
 (test kv-cache-grows-past-a-chunk
   ;; the cache allocates 256 positions at a time; cross the boundary
   (random:seed 1)
-  (let* ((model (mlx.llm::make-llama (tiny-config)))
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config)))
          (tokens (loop repeat 270 collect (random 97))))
     (multiple-value-bind (diff offset cache) (incremental-matches-full-p model tokens 250)
       (is (< diff 1e-4))
@@ -142,13 +222,37 @@ followed by single-token steps through the cache."
       (is (= 512 (mx:dim (mlx.llm::kv-cache-keys (first cache)) 2)) "grown by one chunk"))))
 
 (test model-variants-build
-  (let ((qwen (mlx.llm::make-llama (tiny-config "model_type" "qwen2"))))
+  (let ((qwen (mlx.llm::make-causal-lm (tiny-config "model_type" "qwen2"))))
     (is (nn:child (nn:child (nn:child (first (nn:child (nn:child qwen :model) :layers)) :self-attn) :q-proj) :bias))
     (is (null (nn:child qwen :lm-head)) "tied embeddings"))
-  (let ((untied (mlx.llm::make-llama (tiny-config "tie_word_embeddings" nil))))
+  (let ((untied (mlx.llm::make-causal-lm (tiny-config "tie_word_embeddings" nil))))
     (is (typep (nn:child untied :lm-head) 'nn:linear))
     (is (equal '(1 3 97) (mx:shape (funcall untied (mx:from-lisp '((1 2 3)) :dtype :int32)
                                             (llm:make-cache untied)))))))
+
+(test family-architectures-cache-consistently
+  ;; for each family, decoding through the KV cache matches a full pass;
+  ;; Gemma 3's sliding window is made small enough to take effect
+  (loop for (name . overrides)
+          in '(("phi3" "model_type" "phi3")
+               ("gemma2" "model_type" "gemma2" "head_dim" 16 "query_pre_attn_scalar" 16
+                "attn_logit_softcapping" 50.0 "final_logit_softcapping" 30.0)
+               ("gemma3" "model_type" "gemma3_text" "head_dim" 16 "query_pre_attn_scalar" 16
+                "sliding_window" 6 "sliding_window_pattern" 2 "rope_local_base_freq" 10000.0))
+        do (random:seed 3)
+           (let* ((model (mlx.llm::make-causal-lm (apply #'tiny-config overrides)))
+                  (tokens (loop repeat 20 collect (random 97))))
+             (is (< (incremental-matches-full-p model tokens 7) 1e-4) "~A cache consistency" name)))
+  (let ((arch (mlx.llm::model-arch (mlx.llm::make-causal-lm (tiny-config "model_type" "gemma3_text")))))
+    (is (mlx.llm::arch-qk-norm arch))
+    (is (mlx.llm::arch-four-norms arch))
+    (is (eq :bf16 (mlx.llm::arch-embed-scale arch))))
+  (signals error (mlx.llm::make-causal-lm (tiny-config "model_type" "mamba"))))
+
+(test causal-mask-windows
+  (is (equal '((t nil nil) (t t nil) (t t t)) (lisp (mlx.llm::causal-mask 3 0))))
+  (is (equal '((t t t nil) (t t t t)) (lisp (mlx.llm::causal-mask 2 2))))
+  (is (equal '((nil t t nil) (nil nil t t)) (lisp (mlx.llm::causal-mask 2 2 :window 2)))))
 
 (test llama3-rope-frequencies-match-mlx-lm
   (let* ((scaling (let ((h (make-hash-table :test 'equal)))
@@ -175,7 +279,7 @@ followed by single-token steps through the cache."
 
 (test generation-stops-and-streams
   (random:seed 0)
-  (let* ((model (mlx.llm::make-llama (tiny-config)))
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config)))
          (seen '()))
     (is (= 5 (llm:generate-tokens model '(1 2 3) (lambda (id) (push id seen)) :max-tokens 5)))
     (is (= 5 (length seen)))
@@ -236,3 +340,34 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
 (model-test generate-text
   (let ((text (llm:generate *model* "What is the capital of France? Answer in one sentence." :max-tokens 30)))
     (is (search "Paris" text))))
+
+;;; ------------------------------------------------------------------
+;;; More model families against mlx-lm (opt-in: $MLX_CL_TEST_ALL_MODELS,
+;;; ~5 GB of downloads: Qwen2.5, Llama 3.2, Gemma 2, Gemma 3, Phi-3.5)
+
+(test model-families-match-mlx-lm
+  (if (not (let ((v (uiop:getenv "MLX_CL_TEST_ALL_MODELS"))) (and v (plusp (length v)))))
+      (skip "set MLX_CL_TEST_ALL_MODELS to test Qwen2.5, Llama 3.2, Gemma 2/3 and Phi-3.5")
+      (let ((models (make-hash-table :test 'equal)))
+        (dolist (case (fixture "families.sexp"))
+          (destructuring-bind (&key repo messages text prompt-ids eos ids) case
+            (let* ((model (or (gethash repo models) (setf (gethash repo models) (llm:load-model repo))))
+                   (tk (llm:model-tokenizer model))
+                   ;; Llama 3 templates print today's date
+                   (text (let ((p (search "Today Date: " text)))
+                           (if p
+                               (concatenate 'string (subseq text 0 (+ p 12)) (mlx.llm::today-string)
+                                            (subseq text (position #\Newline text :start p)))
+                               text)))
+                   (want (remove-if (lambda (id) (member id eos)) ids))
+                   (got '()))
+              (is (string= text (llm:apply-chat-template tk messages)) "~A chat template" repo)
+              (unless (search "Today Date" text)
+                (is (equal prompt-ids (llm:encode tk text)) "~A prompt tokens" repo))
+              (llm:generate-tokens model prompt-ids (lambda (id) (push id got))
+                                   :max-tokens (length ids) :eos-ids eos)
+              (setf got (nreverse got))
+              (if (exact-generation-p)
+                  (is (equal want got) "~A greedy tokens (first difference at ~A)" repo (mismatch want got))
+                  (is (equal (subseq want 0 10) (subseq got 0 (min 10 (length got))))
+                      "~A first greedy tokens" repo))))))))

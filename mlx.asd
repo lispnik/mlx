@@ -58,7 +58,7 @@
   :serial t
   :components ((:file "package")
                (:file "tokenizer")
-               (:file "llama")
+               (:file "models")
                (:file "hub")
                (:file "generate")))
 
@@ -68,6 +68,7 @@
   :pathname "tests/"
   :components ((:static-file "fixtures/pretokenize.sexp")
                (:static-file "fixtures/smollm.sexp")
+               (:static-file "fixtures/families.sexp")
                (:file "llm"))
   :perform (test-op (o c) (symbol-call :mlx-llm-tests :run-tests)))
 

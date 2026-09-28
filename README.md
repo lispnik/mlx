@@ -11,8 +11,12 @@ On top of that it provides:
 
 - **`mlx.nn` and `mlx.optimizers`.** Ports of Python MLX's neural-network
   and optimizer libraries that match them numerically.
-- **`mlx/llm`.** Runs Hugging Face Llama, Qwen2 and Mistral-family models,
-  producing the same tokens as mlx-lm at the same speed.
+- **`mlx/llm`.** Runs Hugging Face Llama, Qwen2, Mistral, Phi-3 and
+  Gemma 2/3 models, producing the same tokens as mlx-lm at about the same
+  speed.
+
+Runnable examples, MNIST and a character-level GPT trained from scratch,
+are in [`examples/`](examples/).
 
 ```lisp
 (defpackage :demo (:use :cl) (:local-nicknames (:mx :mlx) (:random :mlx.random)))
@@ -36,6 +40,7 @@ On top of that it provides:
 ocicl install          # cffi, trivial-garbage, fiveam, clingon (from ocicl.csv)
 make test              # FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU;
                        # MLX_CL_TEST_MODELS=1 adds tests against real model weights;
+                       # MLX_CL_TEST_ALL_MODELS=1 adds five more families (~5 GB);
                        # MLX_CL_TEST_EXACT=1 also demands full-length greedy
                        # agreement with mlx-lm, which only holds on the GPU
                        # generation the fixtures came from, an M3)
@@ -54,7 +59,8 @@ If libmlxc isn't in a standard location, set `MLX_C_LIBRARY=/path/to/libmlxc.dyl
 | `src/op.lisp` | `define-op`: argument conversion, result slots, status checking |
 | `src/*.lisp` | Hand-written layer: arrays, devices and streams, closures and transforms, I/O, kernels |
 | `src/nn/` | `mlx.nn` and `mlx.optimizers` |
-| `src/llm/` | Tokenizer, Llama-family models, generation, Hub download (system `mlx/llm`) |
+| `src/llm/` | Tokenizer, the configurable decoder model, generation, Hub download (system `mlx/llm`) |
+| `examples/` | MNIST and a character-level GPT, runnable from the project root |
 | `tests/` | FiveAM suites (`mlx/tests`, `mlx/llm-tests`) and reference fixtures |
 | `cli/main.lisp` | clingon command-line driver |
 
@@ -245,21 +251,36 @@ downloaded on first use to `~/.cache/mlx-cl/models` (`$MLX_CL_CACHE`), and
 
 - `llama`, `mistral` and `qwen2`, which cover SmolLM, TinyLlama, Llama
   3.x and Qwen2.5;
-- MLX 4- and 8-bit quantized checkpoints (e.g. from `mlx-community`);
-- Llama 3 RoPE scaling and tied embeddings.
+- `phi3` (Phi-3 and 3.5, including LongRoPE);
+- `gemma2` (attention and logit soft-capping);
+- `gemma3_text` (sliding-window layers, q/k norms);
+- MLX 4- and 8-bit quantized checkpoints (e.g. from `mlx-community`).
 
-The byte-level BPE tokenizer is written from scratch. It reads
-`tokenizer.json` (GPT-2, SmolLM, Llama 3 and Qwen2 styles) and matches the
-Hugging Face `tokenizers` library token for token. Chat templates for ChatML
-and Llama 3 are rendered directly rather than through a Jinja interpreter,
-and match `apply_chat_template` for SmolLM2, Qwen2.5 and Llama 3.2.
+One configurable decoder implements them all. Each family's departures
+from Llama follow mlx-lm operation for operation, down to details such as
+Gemma 3 rounding its embedding scale to bfloat16 before a float16 multiply.
 
-**Verified against mlx-lm:**
+The BPE tokenizer is written from scratch and reads `tokenizer.json`. It
+covers both families:
 
-- A full forward pass gives bit-identical logits.
-- Greedy generation gives identical tokens for SmolLM2-135M,
-  Qwen2.5-0.5B-4bit and Llama-3.2-1B-4bit.
-- Decoding speed is the same (about 250 tokens/s for SmolLM2-135M on an M3).
+- byte-level (GPT-2, SmolLM, Llama 3, Qwen2);
+- SentencePiece-style, with byte fallback (Gemma, Phi-3, Llama 2).
+
+It matches the Hugging Face `tokenizers` library token for token on all six.
+
+Chat templates are rendered directly rather than through a Jinja
+interpreter. ChatML, Llama 3, Gemma and Phi-3 formats are supported, and
+match `apply_chat_template` for every model above. Generation also stops at
+the template's end-of-turn token, which some checkpoints omit from their
+EOS list.
+
+**Verified against mlx-lm** on an M3:
+
+- Greedy generation gives identical tokens and text for SmolLM2-135M,
+  Qwen2.5-0.5B, Llama-3.2-1B, Gemma-2-2B, Gemma-3-1B and Phi-3.5-mini
+  (4-bit mlx-community checkpoints).
+- Decoding speed is 89–100% of mlx-lm's, e.g. about 250 tokens/s for
+  SmolLM2-135M and 120 for Gemma-3-1B.
 
 To get there, the generation loop:
 
@@ -308,7 +329,7 @@ $ bin/mlx-cl inspect model.safetensors  # tensor names, dtypes, shapes, sizes
 $ bin/mlx-cl train -s 200               # compiled value-and-grad linear regression
 $ bin/mlx-cl generate "Write a haiku about Lisp"            # SmolLM2-135M by default
 $ bin/mlx-cl generate -m mlx-community/Qwen2.5-0.5B-Instruct-4bit -t 0 -v "Explain monads"
-$ bin/mlx-cl chat -m mlx-community/Llama-3.2-1B-Instruct-4bit
+$ bin/mlx-cl chat -m mlx-community/gemma-3-1b-it-4bit
 $ bin/mlx-cl download mlx-community/Qwen2.5-0.5B-Instruct-4bit
 ```
 

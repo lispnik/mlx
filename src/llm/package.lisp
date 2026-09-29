@@ -15,4 +15,6 @@ with a KV cache, sampling and generation.")
    #:load-model #:model-config #:model-tokenizer #:download-model #:resolve-model
    #:causal-lm #:model-arch #:make-cache #:cache-offset
    ;; generation
-   #:generate #:generate-tokens #:make-sampler))
+   #:generate #:generate-tokens #:make-sampler
+   ;; writing Lisp
+   #:generate-lisp-form #:evaluate-lisp #:write-lisp))

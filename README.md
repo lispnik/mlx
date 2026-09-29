@@ -307,6 +307,62 @@ To get there, the generation loop:
   bf16 rounding;
 - keeps a chunked, preallocated KV cache.
 
+### Writing Lisp
+
+`write-lisp` asks a model for code, runs it with tests, and feeds any
+failure back until the tests pass:
+
+```lisp
+(mlx.llm:write-lisp (mlx.llm:load-model "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+                    "Define (flatten tree) returning the atoms of a nested list in order"
+                    :tests '("(equal (flatten '(1 (2 (3)) 4)) '(1 2 3 4))"))
+```
+
+```
+$ bin/mlx-cl lisp -v 'Define (primes-below n) using a sieve' \
+    -T "(equal (primes-below 20) '(2 3 5 7 11 13 17 19))"
+```
+
+It uses Lisp's structure at every step:
+
+- **Reader-constrained decoding.** A lexer follows the reader through
+  strings, `|symbols|`, character literals, comments and `#` dispatch. At each
+  step, every token that would break the form is masked out. The model can
+  only produce a prefix of exactly one readable form. `#.` (read-time
+  evaluation) cannot be written at all.
+- **Auto-close.** If the model tries to end its turn with forms still open,
+  having lost count of its parens, the form is closed for it.
+- **Parens from indentation.** Models indent Lisp well but miscount closing
+  parens. When the two disagree, the closers are re-derived from the
+  indentation, as in Parinfer's indent mode, and both readings are tried.
+  This fixes the common failure where the closers run one short and later
+  forms end up inside a `defun`.
+- **A REPL loop.** Code runs in a fresh package, by default in a child
+  SBCL with a timeout (`:isolation :in-process` uses a thread instead). The
+  model gets concise feedback, clipped to keep the prompt small:
+  - the error, including stack exhaustion;
+  - compiler warnings;
+  - each failing `(equal (f x) y)` test, as "`(f x)` returned *z*, expected *y*";
+  - hints when it reaches for libraries that aren't there.
+
+  Retries are sampled at temperature 0.7, since a greedy retry tends to
+  resubmit the same code.
+
+`generate-lisp-form` (constrained decoding alone) and `evaluate-lisp` are
+also exported. Binding `mlx.llm::*constraint-trace*` to a stream reports
+each token where the constraint overrode the model.
+
+Qwen2.5-Coder-7B (4-bit, 4.5 GB peak, about 18 tokens/s on an M3) solves
+typical exercises in one or two attempts, such as:
+
+- `flatten`, run-length encoding and matrix multiplication;
+- a `while` macro;
+- a prime sieve.
+
+Harder exercises can exhaust the attempts on logic errors. The 3B model is
+noticeably weaker at Lisp; its output matches mlx-lm's, so the model is the
+limit, not the implementation.
+
 ## Memory management
 
 Each MLX object is owned by a Lisp handle with a finalizer, so garbage
@@ -350,6 +406,7 @@ $ bin/mlx-cl generate -m mlx-community/Qwen2.5-0.5B-Instruct-4bit -t 0 -v "Expla
 $ bin/mlx-cl chat -m mlx-community/gemma-3-1b-it-4bit
 $ bin/mlx-cl generate -m mlx-community/Qwen3-0.6B-4bit --no-think "Explain monads"
 $ bin/mlx-cl download mlx-community/Qwen2.5-0.5B-Instruct-4bit
+$ bin/mlx-cl lisp -v 'Define (flatten tree)' -T "(equal (flatten '(1 (2))) '(1 2))"
 ```
 
 ## Implementation notes

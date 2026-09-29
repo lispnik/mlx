@@ -60,7 +60,8 @@
                (:file "tokenizer")
                (:file "models")
                (:file "hub")
-               (:file "generate")))
+               (:file "generate")
+               (:file "lisp")))
 
 (defsystem "mlx/llm-tests"
   :description "FiveAM tests for mlx/llm."

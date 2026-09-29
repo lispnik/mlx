@@ -42,6 +42,13 @@
 (defmacro with-mlx-errors (&body body)
   "Report errors as one line and exit non-zero instead of entering the debugger."
   `(handler-case (progn ,@body)
+     (stream-error (e)
+       (if (eq (stream-error-stream e) sb-sys:*stdout*)
+           ;; the reader went away (mlx-cl ... | head): stop quietly,
+           ;; without flushing into the closed pipe again
+           (sb-ext:exit :code 0 :abort t)
+           (progn (format *error-output* "error: ~A~%" e)
+                  (uiop:quit 1))))
      (error (e)
        (format *error-output* "error: ~A~%" e)
        (uiop:quit 1))))
@@ -84,6 +91,7 @@
     (with-mlx-errors
       (mx:with-device (device)
         (let ((*package* (find-package :mlx-user))
+              (*readtable* (mx:enable-array-syntax (copy-readtable)))
               (result nil))
           (with-input-from-string (in (format nil "~{~A~^ ~}" args))
             (loop for form = (read in nil in)

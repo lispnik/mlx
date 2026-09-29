@@ -135,6 +135,13 @@
   (is (equal '(2.0 2.0) (lisp (mx:add (mx:ones '(2)) 1))))
   (is (equal '(2.0 2.0) (lisp (mx:add (mx:ones '(2)) 1 :stream :cpu)))))
 
+(test ops-work-in-any-thread
+  ;; MLX streams are per thread; the stream cache must be too
+  (is (equal '(2.0 2.0) (lisp (mx:add (mx:ones '(2)) 1))))
+  (is (equal '(2.0 2.0)
+             (sb-thread:join-thread
+              (sb-thread:make-thread (lambda () (lisp (mx:add (mx:ones '(2)) 1))))))))
+
 (test with-scope
   (let (inner kept result)
     (setf result (mx:with-scope ()

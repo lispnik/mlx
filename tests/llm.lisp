@@ -641,3 +641,19 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
         (let* ((text (llm:complete-lisp model prefix :suffix "))" :max-tokens 40))
                (lx (mlx.llm::form-lexer (concatenate 'string prefix text))))
           (is (and lx (not (mlx.llm::lisp-form-complete-p lx))) "seed ~D: ~S" seed text))))))
+
+(test completion-runs-on-one-thread
+  ;; requests arrive on many threads (SLY, SLIME); the work runs on one
+  (let ((threads (loop repeat 3
+                       collect (sb-thread:join-thread
+                                (sb-thread:make-thread
+                                 (lambda () (mlx.llm::call-in-completion-thread
+                                             (lambda () sb-thread:*current-thread*))))))))
+    (is (= 1 (length (remove-duplicates threads))))
+    (is (string= "mlx completion" (sb-thread:thread-name (first threads)))))
+  (signals error (mlx.llm::call-in-completion-thread (lambda () (error "boom")))))
+
+(test completion-editor-package-names
+  (dolist (name '("mlx-llm-tests.shop" ":mlx-llm-tests.shop" "#:mlx-llm-tests.shop" "MLX-LLM-TESTS.SHOP"))
+    (is (eq (find-package :mlx-llm-tests.shop) (mlx.llm::editor-package name)) "~S" name))
+  (is (eq (find-package :cl-user) (mlx.llm::editor-package ":no-such-package"))))

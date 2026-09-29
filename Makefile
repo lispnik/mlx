@@ -3,7 +3,7 @@
 SBCL ?= sbcl
 LISP = $(SBCL) --noinform --non-interactive
 
-.PHONY: all deps generate check-generated test test-emacs cli clean
+.PHONY: all deps generate check-generated test test-emacs cli demo clean
 
 all: cli
 
@@ -27,6 +27,13 @@ test:            ## run the FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU
 
 test-emacs:      ## run the ERT tests of emacs/mlx-complete.el (needs emacs)
 	emacs --batch -L emacs -l mlx-complete-tests -f ert-run-tests-batch-and-exit
+
+demo: bin/mlx-cl  ## record demo/out/mlx-demo.mp4 (needs vhs, ffmpeg, emacs, $$SLY_DIR)
+	mkdir -p demo/out
+	for tape in demo/[0-9]*.tape; do vhs $$tape || exit 1; done
+	cd demo/out && ls [0-9]*.mp4 | sed "s/.*/file '&'/" > list.txt && \
+	  ffmpeg -loglevel error -y -f concat -safe 0 -i list.txt -c:v libx264 -crf 20 \
+	         -pix_fmt yuv420p -movflags +faststart mlx-demo.mp4
 
 cli: bin/mlx-cl  ## build the command-line driver
 

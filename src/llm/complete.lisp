@@ -24,7 +24,6 @@
 for fill-in-the-middle.")
 
 (defvar *completion-model* nil)
-(defvar *completion-lock* (sb-thread:make-mutex :name "mlx completion"))
 
 (defun completion-model ()
   (or *completion-model* (setf *completion-model* (load-model *completion-model-name*))))
@@ -245,6 +244,46 @@ frob\").  Symbols the reader had to create are uninterned afterwards."
 
 ;;; ------------------------------------------------------------------
 ;;; Editor entry point
+;;;
+;;; SLY and SLIME evaluate each request in a thread of their own, but MLX
+;;; work belongs to the thread that queued it: a lazy array built on one
+;;; thread cannot be evaluated on another.  So all completion work runs on
+;;; one long-lived worker thread.
+
+(defstruct (job (:constructor make-job (function))) function result done)
+
+(defvar *jobs* '())
+(defvar *jobs-lock* (sb-thread:make-mutex :name "mlx completion jobs"))
+(defvar *jobs-changed* (sb-thread:make-waitqueue))
+(defvar *completion-worker* nil)
+
+(defun completion-worker-loop ()
+  (loop (let ((job (sb-thread:with-mutex (*jobs-lock*)
+                     (loop until *jobs* do (sb-thread:condition-wait *jobs-changed* *jobs-lock*))
+                     (pop *jobs*))))
+          (let ((result (handler-case (list :ok (funcall (job-function job)))
+                          (error (e) (list :error e)))))
+            (sb-thread:with-mutex (*jobs-lock*)
+              (setf (job-result job) result (job-done job) t)
+              (sb-thread:condition-broadcast *jobs-changed*))))))
+
+(defun call-in-completion-thread (function)
+  "FUNCTION's value, computed on the completion worker thread."
+  (let ((job (make-job function)))
+    (sb-thread:with-mutex (*jobs-lock*)
+      (unless (and *completion-worker* (sb-thread:thread-alive-p *completion-worker*))
+        (setf *completion-worker* (sb-thread:make-thread #'completion-worker-loop :name "mlx completion")))
+      (setf *jobs* (append *jobs* (list job)))
+      (sb-thread:condition-broadcast *jobs-changed*)
+      (loop until (job-done job) do (sb-thread:condition-wait *jobs-changed* *jobs-lock*)))
+    (destructuring-bind (tag value) (job-result job)
+      (if (eq tag :error) (error value) value))))
+
+(defun editor-package (name)
+  "The package an editor names NAME: \"shop\", \":shop\", \"#:shop\" or
+\"SHOP\" (SLY reports it as written in the IN-PACKAGE form)."
+  (let ((name (string-left-trim "#:" (string-trim '(#\Space #\" ) name))))
+    (or (find-package name) (find-package (string-upcase name)) (find-package :cl-user))))
 
 (defun emacs-complete (form-prefix context suffix package-name file mode)
   "For emacs/mlx-complete.el: complete at point with *COMPLETION-MODEL*.
@@ -253,12 +292,20 @@ error-message)."
   (let ((start (get-internal-real-time)))
     (flet ((elapsed () (float (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
       (handler-case
-          (sb-thread:with-mutex (*completion-lock*)
-            (multiple-value-bind (text unknown)
-                (complete-lisp (completion-model) form-prefix :context context :suffix suffix
-                                                              :package (or (find-package (string-upcase package-name))
-                                                                           (find-package package-name)
-                                                                           :cl-user)
-                                                              :file file :mode (if (eq mode :line) :line :form))
-              (list text unknown (elapsed))))
+          (multiple-value-bind (text complaints)
+              (values-list
+               (call-in-completion-thread
+                (lambda ()
+                  (multiple-value-list
+                   (complete-lisp (completion-model) form-prefix
+                                  :context context :suffix suffix
+                                  :package (editor-package package-name)
+                                  :file file :mode (if (eq mode :line) :line :form))))))
+            (list text complaints (elapsed)))
         (error (e) (list "" nil (elapsed) (princ-to-string e)))))))
+
+(defun emacs-warm-up ()
+  "For emacs/mlx-complete.el: load the completion model and run one small
+completion, so the first real one is fast.  Returns T."
+  (call-in-completion-thread
+   (lambda () (complete-lisp (completion-model) "(defun f (x) " :max-tokens 4) t)))

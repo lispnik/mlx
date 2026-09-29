@@ -94,4 +94,29 @@ answers ANSWER."
     (should-not (string-match-p "mlx\\.llm:" printed))
     (should (string-match-p "asdf:load-system" printed))))
 
+(ert-deftest mlx-complete-tab-accepts-an-answer-that-arrives-between-commands ()
+  (with-temp-buffer
+    (switch-to-buffer (current-buffer))
+    (lisp-mode)
+    (mlx-complete-mode 1)
+    (insert "(defun f (x)\n  ")
+    ;; the answer arrives from the Lisp connection, outside any command
+    (run-at-time 0 nil (lambda () (mlx-complete--show "(1+ x))" nil 0.1)))
+    (sit-for 0.1)
+    (should mlx-complete--overlay)
+    (execute-kbd-macro (kbd "TAB"))
+    (should (equal (buffer-string) "(defun f (x)\n  (1+ x))"))))
+
+(ert-deftest mlx-complete-other-keys-dismiss-and-tab-indents-as-usual ()
+  (with-temp-buffer
+    (switch-to-buffer (current-buffer))
+    (lisp-mode)
+    (mlx-complete-mode 1)
+    (insert "(defun f (x)\n  ")
+    (run-at-time 0 nil (lambda () (mlx-complete--show "(1+ x))" nil 0.1)))
+    (sit-for 0.1)
+    (execute-kbd-macro (kbd "y"))
+    (should-not mlx-complete--overlay)
+    (should (equal (buffer-string) "(defun f (x)\n  y"))))
+
 ;;; mlx-complete-tests.el ends here

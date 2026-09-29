@@ -529,6 +529,12 @@ though, and GC can't see that pressure. In loops, free deterministically:
 `mx:free` releases a handle immediately. Using a freed handle signals a Lisp
 error; it never touches freed memory.
 
+**Threads.** MLX streams belong to the thread that creates them. Each
+thread gets its own default streams, so operations work from any thread
+(SLY and SLIME evaluate requests in threads of their own). A lazy array,
+though, must be evaluated on the thread that built it: call `mx:eval` before
+handing one to another thread.
+
 Handles created inside `with-scope` skip finalizer registration, which costs
 more than a small op; only survivors leaving the outermost scope get one.
 

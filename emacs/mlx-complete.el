@@ -24,7 +24,8 @@
 ;; Then C-c TAB (`mlx-complete-at-point') shows a completion as grey text:
 ;; TAB accepts it, anything else dismisses it.  With a prefix argument it
 ;; completes to the end of the line only.  The first use loads the model
-;; (`mlx-complete-model', about 1 GB).
+;; (`mlx-complete-model', about 1 GB); `mlx-complete-preload' does that
+;; ahead of time, e.g. from `sly-connected-hook'.
 
 ;;; Code:
 
@@ -79,15 +80,27 @@
       (and (fboundp 'slime-current-package) (slime-current-package))
       "CL-USER"))
 
-(defun mlx-complete--request-form (form-prefix context suffix package file mode)
-  "The form asking the Lisp for a completion.  It names mlx.llm's symbols
-only at run time, loading mlx/llm first if the image lacks it."
+(defun mlx-complete--call-form (function &rest args)
+  "A form calling mlx.llm's FUNCTION (a name) on ARGS.  It names mlx.llm's
+symbols only at run time, loading mlx/llm first if the image lacks it."
   `(cl:let ((package (cl:or (cl:find-package "MLX.LLM")
                             (cl:progn (asdf:load-system "mlx/llm")
                                       (cl:find-package "MLX.LLM")))))
      (cl:setf (cl:symbol-value (cl:find-symbol "*COMPLETION-MODEL-NAME*" package)) ,mlx-complete-model)
-     (cl:funcall (cl:find-symbol "EMACS-COMPLETE" package)
-                 ,form-prefix ,context ,suffix ,package ,file ,mode)))
+     (cl:funcall (cl:find-symbol ,function package) ,@args)))
+
+(defun mlx-complete--request-form (form-prefix context suffix package file mode)
+  "The form asking the Lisp for a completion."
+  (mlx-complete--call-form "EMACS-COMPLETE" form-prefix context suffix package file mode))
+
+;;;###autoload
+(defun mlx-complete-preload ()
+  "Load mlx/llm and the model in the connected Lisp, in the background, so
+the first completion is quick."
+  (interactive)
+  (message "mlx-complete: loading %s..." mlx-complete-model)
+  (mlx-complete--eval-async (mlx-complete--call-form "EMACS-WARM-UP")
+                            (lambda (_) (message "mlx-complete: ready"))))
 
 (defun mlx-complete--form-start ()
   "Where the top-level form around point starts, or nil at top level."
@@ -100,7 +113,13 @@ only at run time, loading mlx/llm first if the image lacks it."
   (interactive)
   (when (overlayp mlx-complete--overlay)
     (delete-overlay mlx-complete--overlay))
-  (setq mlx-complete--overlay nil))
+  (setq mlx-complete--overlay nil)
+  (remove-hook 'pre-command-hook #'mlx-complete--before-command t))
+
+(defun mlx-complete--before-command ()
+  "Dismiss the pending completion unless the command accepts it."
+  (unless (eq this-command 'mlx-complete-accept)
+    (mlx-complete-dismiss)))
 
 (defun mlx-complete-accept ()
   "Insert the pending completion."
@@ -112,12 +131,11 @@ only at run time, loading mlx/llm first if the image lacks it."
       (goto-char pos)
       (insert text))))
 
-(defvar mlx-complete-preview-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB") #'mlx-complete-accept)
-    (define-key map (kbd "<tab>") #'mlx-complete-accept)
-    map)
-  "Keys active while a completion is shown.")
+(defconst mlx-complete--accept-binding
+  '(menu-item "" mlx-complete-accept :filter (lambda (cmd) (and mlx-complete--overlay cmd)))
+  "TAB's binding in `mlx-complete-mode': accept, but only while a
+completion is shown.  (A transient map would not do: the answer arrives
+between commands, from the Lisp connection.)")
 
 (defun mlx-complete--show (text complaints seconds &optional error)
   "Show TEXT at point as a pending completion."
@@ -130,7 +148,7 @@ only at run time, loading mlx/llm first if the image lacks it."
            (overlay-put ov 'after-string
                         (propertize text 'face 'mlx-complete-preview 'cursor t))
            (setq mlx-complete--overlay ov))
-         (set-transient-map mlx-complete-preview-map nil #'mlx-complete-dismiss)
+         (add-hook 'pre-command-hook #'mlx-complete--before-command nil t)
          (message "mlx-complete: TAB to accept (%.1fs)%s" seconds
                   (if complaints
                       (concat "; compiler: " (mapconcat #'identity complaints "; "))
@@ -172,6 +190,8 @@ With prefix argument LINE, complete to the end of the line only."
   :lighter " mlx"
   :keymap (let ((map (make-sparse-keymap)))
             (define-key map (kbd "C-c TAB") #'mlx-complete-at-point)
+            (define-key map (kbd "TAB") mlx-complete--accept-binding)
+            (define-key map (kbd "<tab>") mlx-complete--accept-binding)
             map)
   (unless mlx-complete-mode (mlx-complete-dismiss)))
 

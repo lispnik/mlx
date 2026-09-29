@@ -18,4 +18,4 @@ with a KV cache, sampling and generation.")
    #:generate #:generate-tokens #:make-sampler
    ;; writing Lisp
    #:generate-lisp-form #:evaluate-lisp #:write-lisp
-   #:complete-lisp #:emacs-complete #:*completion-model-name*))
+   #:complete-lisp #:emacs-complete #:emacs-warm-up #:*completion-model-name*))

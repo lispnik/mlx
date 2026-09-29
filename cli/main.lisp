@@ -5,7 +5,7 @@
 
 (defpackage :mlx-cli
   (:use :cl)
-  (:local-nicknames (:mx :mlx) (:random :mlx.random) (:llm :mlx.llm))
+  (:local-nicknames (:mx :mlx) (:random :mlx.random) (:llm :mlx.llm) (:sr :mlx.symreg))
   (:export #:main #:top-level-command))
 
 (in-package :mlx-cli)
@@ -422,6 +422,136 @@
    :handler #'lisp-handler))
 
 ;;; ------------------------------------------------------------------
+;;; symreg
+
+(defun read-formula (text)
+  (let ((*read-eval* nil) (*package* (find-package :mlx.symreg))
+        (*read-default-float-format* 'single-float))
+    (read-from-string text)))
+
+(defun formula-variables (formula)
+  "X0 .. Xk for the highest Xk in FORMULA."
+  (let ((top -1))
+    (labels ((walk (e)
+               (cond ((consp e) (mapc #'walk (rest e)))
+                     ((symbolp e)
+                      (let ((name (symbol-name e)))
+                        (when (and (> (length name) 1) (char-equal (char name 0) #\X)
+                                   (every #'digit-char-p (subseq name 1)))
+                          (setf top (max top (parse-integer name :start 1)))))))))
+      (walk formula))
+    (loop for i to top collect (intern (format nil "X~D" i) :mlx.symreg))))
+
+(defun formula-data (cmd)
+  "Samples of the --formula: (values rows targets variables)."
+  (let* ((formula (read-formula (clingon:getopt cmd :formula)))
+         (variables (formula-variables formula))
+         (f (sr:expression-function formula variables))
+         (low (number-option cmd :low)) (high (number-option cmd :high))
+         (noise (number-option cmd :noise))
+         (*random-state* (sb-ext:seed-random-state (or (clingon:getopt cmd :seed) 0)))
+         (rows (loop repeat (clingon:getopt cmd :samples)
+                     collect (loop repeat (max 1 (length variables))
+                                   collect (+ low (random (float (- high low) 1f0))))))
+         (ys (mapcar (lambda (r) (apply f (subseq r 0 (length variables)))) rows)))
+    (when (plusp noise)
+      (let* ((mean (/ (reduce #'+ ys) (length ys)))
+             (sd (sqrt (/ (reduce #'+ ys :key (lambda (y) (expt (- y mean) 2))) (length ys)))))
+        (setf ys (mapcar (lambda (y)            ; Box-Muller
+                           (+ y (* noise sd (sqrt (* -2 (log (- 1 (random 1d0))))) (cos (* 2 pi (random 1d0))))))
+                         ys))))
+    (values rows ys (or variables (list (intern "X0" :mlx.symreg))))))
+
+(defun csv-data (path)
+  "Numeric columns of the CSV file at PATH, the last being the target:
+(values rows targets variables).  A header row names the variables."
+  (let* ((lines (remove-if (lambda (l) (zerop (length (string-trim " " l))))
+                           (uiop:read-file-lines path)))
+         (split (lambda (l) (mapcar (lambda (f) (string-trim " \"" f))
+                                    (uiop:split-string (string-right-trim '(#\Return) l) :separator ","))))
+         (first-row (funcall split (first lines)))
+         (header (notevery (lambda (f) (realp (ignore-errors (read-formula f)))) first-row))
+         (rows (loop for l in (if header (rest lines) lines)
+                     collect (mapcar (lambda (f)
+                                       (let ((n (ignore-errors (read-formula f))))
+                                         (unless (realp n) (error "Not a number in ~A: ~S" path f))
+                                         n))
+                                     (funcall split l))))
+         (nvars (1- (length first-row))))
+    (values (mapcar #'butlast rows)
+            (mapcar (lambda (r) (car (last r))) rows)
+            (if header
+                (loop for name in (butlast first-row)
+                      collect (intern (string-upcase (substitute #\- #\Space name)) :mlx.symreg))
+                (loop for i below nvars collect (intern (format nil "X~D" i) :mlx.symreg))))))
+
+(defun symreg-handler (cmd)
+  (let ((formula (clingon:getopt cmd :formula))
+        (csv (first (clingon:command-arguments cmd))))
+    (unless (or formula csv) (clingon:print-usage-and-exit cmd *error-output*))
+    (with-mlx-errors
+      (multiple-value-bind (rows ys variables) (if csv (csv-data csv) (formula-data cmd))
+        (format *error-output* "~&~:D samples of ~{~(~A~)~^, ~}~%" (length rows) variables)
+        (multiple-value-bind (best front)
+            (sr:symbolic-regression rows ys
+                                    :variables variables
+                                    :operators (mapcar #'read-formula
+                                                       (uiop:split-string (clingon:getopt cmd :operators)
+                                                                          :separator ", "))
+                                    :population (clingon:getopt cmd :population)
+                                    :generations (clingon:getopt cmd :generations)
+                                    :time-limit (clingon:getopt cmd :time-limit)
+                                    :max-size (clingon:getopt cmd :max-size)
+                                    :scaling (not (clingon:getopt cmd :no-scaling))
+                                    :seed (clingon:getopt cmd :seed)
+                                    :stream (and (not (clingon:getopt cmd :quiet)) *error-output*))
+          (let ((*print-case* :downcase) (*print-pretty* nil) (*package* (find-package :mlx.symreg)))
+            (format t "~&~%size  loss (MSE / variance)  expression~%")
+            (dolist (c front)
+              (format t "~4D  ~21,3,,,,,'EG  ~S~%" (sr:candidate-size c) (sr:candidate-loss c)
+                      (mlx.symreg::round-constants (sr:candidate-expression c))))
+            (format t "~%best: (lambda ~S ~S)~%" variables (sr:candidate-expression best))))))))
+
+(defun symreg-command ()
+  (clingon:make-command
+   :name "symreg"
+   :description "find a formula fitting data, by genetic programming on the GPU"
+   :usage "[options] [DATA.csv]"
+   :options (list (clingon:make-option :string :long-name "formula" :short-name #\f :key :formula
+                                               :description "generate data from this formula in x0, x1, ... instead of reading a CSV (last column = target)")
+                  (clingon:make-option :integer :long-name "samples" :short-name #\n :key :samples
+                                                :description "samples to generate" :initial-value 300)
+                  (clingon:make-option :string :long-name "low" :key :low
+                                               :description "smallest generated input" :initial-value "-3")
+                  (clingon:make-option :string :long-name "high" :key :high
+                                               :description "largest generated input" :initial-value "3")
+                  (clingon:make-option :string :long-name "noise" :key :noise
+                                               :description "Gaussian noise added, relative to the target's spread"
+                                               :initial-value "0")
+                  (clingon:make-option :string :long-name "operators" :short-name #\o :key :operators
+                                               :description (format nil "operators to use, from: ~{~(~A~)~^ ~}"
+                                                                    (sr:operator-names))
+                                               :initial-value (format nil "~{~(~A~)~^ ~}" sr:*default-operators*))
+                  (clingon:make-option :integer :long-name "population" :short-name #\p :key :population
+                                                :description "expressions per generation" :initial-value 1000)
+                  (clingon:make-option :integer :long-name "generations" :short-name #\g :key :generations
+                                                :description "maximum generations" :initial-value 200)
+                  (clingon:make-option :integer :long-name "time-limit" :short-name #\t :key :time-limit
+                                                :description "stop after this many seconds")
+                  (clingon:make-option :integer :long-name "max-size" :key :max-size
+                                                :description "largest expression, in nodes" :initial-value 30)
+                  (clingon:make-option :flag :long-name "no-scaling" :key :no-scaling
+                                             :description "judge f itself, not the best a + b f")
+                  (clingon:make-option :integer :long-name "seed" :key :seed :description "random seed")
+                  (clingon:make-option :flag :long-name "quiet" :short-name #\q :key :quiet
+                                             :description "don't report each generation"))
+   :examples '(("Rediscover a formula from 300 samples of it:" .
+                "mlx-cl symreg -f '(+ (square x0) (* 2.5 (sin x1)))'")
+               ("Fit data (the last column is the target):" .
+                "mlx-cl symreg -t 60 data.csv"))
+   :handler #'symreg-handler))
+
+;;; ------------------------------------------------------------------
 
 (defun top-level-command ()
   (clingon:make-command
@@ -433,7 +563,8 @@
    :handler (lambda (cmd) (clingon:print-usage-and-exit cmd t))
    :sub-commands (list (info-command) (eval-command) (bench-command)
                        (inspect-command) (train-command)
-                       (generate-command) (chat-command) (download-command) (lisp-command))))
+                       (generate-command) (chat-command) (download-command) (lisp-command)
+                       (symreg-command))))
 
 (defun main ()
   (clingon:run (top-level-command)))

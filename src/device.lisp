@@ -172,20 +172,21 @@ changes made through SET-DEFAULT-DEVICE / SET-DEFAULT-STREAM.")
 (defun cached-device-stream (device)
   (let ((key (cons (mlx:device-type device) (mlx:device-index device))))
     (or (gethash key *stream-cache*)
-        (setf (gethash key *stream-cache*) (mlx:default-stream device)))))
+        (setf (gethash key *stream-cache*) (mlx:persist (mlx:default-stream device))))))
 
 (defun resolve-stream (s)
   "Foreign stream pointer for an operation's :STREAM argument S."
   (let ((s (or s mlx:*stream*)))
     (etypecase s
       (null (ptr (or *default-stream-cache*
-                     (setf *default-stream-cache* (mlx:default-stream)))))
+                     ;; cached streams must outlive the WITH-SCOPE that first needed them
+                     (setf *default-stream-cache* (mlx:persist (mlx:default-stream))))))
       (mlx:mlx-stream (ptr s))
       (mlx:mlx-device (ptr (cached-device-stream s)))
       ((member :cpu :gpu)
        (ptr (or (gethash (cons s 0) *stream-cache*)
                 (setf (gethash (cons s 0) *stream-cache*)
-                      (mlx:default-stream (mlx:make-device s)))))))))
+                      (mlx:persist (mlx:default-stream (mlx:make-device s))))))))))
 
 (defmacro mlx:with-stream ((stream) &body body)
   "Run BODY with operations defaulting to STREAM (a stream, device, :CPU or :GPU)."

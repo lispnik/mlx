@@ -127,6 +127,14 @@
     (signals error (mx:shape a))
     (signals error (mx:add a 1))))
 
+(test stream-cache-outlives-scopes
+  ;; the first op after a reset caches the default stream inside a scope;
+  ;; leaving the scope must not free the cached stream
+  (mlx.impl::reset-stream-cache)
+  (mx:with-scope () (mx:add (mx:ones '(2)) 1) (mx:add (mx:ones '(2)) 1 :stream :cpu))
+  (is (equal '(2.0 2.0) (lisp (mx:add (mx:ones '(2)) 1))))
+  (is (equal '(2.0 2.0) (lisp (mx:add (mx:ones '(2)) 1 :stream :cpu)))))
+
 (test with-scope
   (let (inner kept result)
     (setf result (mx:with-scope ()

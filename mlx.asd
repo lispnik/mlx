@@ -63,6 +63,21 @@
                (:file "generate")
                (:file "lisp")))
 
+(defsystem "mlx/symreg"
+  :description "Symbolic regression: genetic programming over Lisp expressions, evaluated and tuned on the GPU."
+  :depends-on ("mlx")
+  :pathname "src/symreg/"
+  :serial t
+  :components ((:file "package")
+               (:file "symreg")))
+
+(defsystem "mlx/symreg-tests"
+  :description "FiveAM tests for mlx/symreg."
+  :depends-on ("mlx/symreg" "fiveam")
+  :pathname "tests/"
+  :components ((:file "symreg"))
+  :perform (test-op (o c) (symbol-call :mlx-symreg-tests :run-tests)))
+
 (defsystem "mlx/llm-tests"
   :description "FiveAM tests for mlx/llm."
   :depends-on ("mlx/llm" "fiveam")
@@ -76,7 +91,7 @@
 
 (defsystem "mlx/cli"
   :description "Command-line driver for mlx, built with clingon."
-  :depends-on ("mlx" "mlx/llm" "clingon")
+  :depends-on ("mlx" "mlx/llm" "mlx/symreg" "clingon")
   :pathname "cli/"
   :serial t
   :components ((:file "main"))

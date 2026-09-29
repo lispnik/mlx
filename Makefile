@@ -22,6 +22,8 @@ test:            ## run the FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU
 	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-tests :run-tests) 0 1))'
 	$(LISP) --eval '(asdf:load-system "mlx/llm-tests")' \
 	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-llm-tests :run-tests) 0 1))'
+	$(LISP) --eval '(asdf:load-system "mlx/symreg-tests")' \
+	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-symreg-tests :run-tests) 0 1))'
 
 cli: bin/mlx-cl  ## build the command-line driver
 

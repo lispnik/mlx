@@ -20,6 +20,10 @@
 (in-suite :mlx.llm)
 
 (defun run-tests ()
+  "Run the suite.  $MLX_CL_TEST_DEVICE=cpu runs it on the CPU."
+  (let ((device (uiop:getenv "MLX_CL_TEST_DEVICE")))
+    (when (and device (plusp (length device)))
+      (mx:set-default-device (intern (string-upcase device) :keyword))))
   (let ((results (run :mlx.llm)))
     (explain! results)
     (results-status results)))
@@ -317,8 +321,9 @@ followed by single-token steps through the cache."
   (let* ((root (asdf:system-relative-pathname "mlx" "tests/fixtures/tiny/"))
          (fixture-version (string-trim '(#\Newline) (uiop:read-file-string (merge-pathnames "MLX_VERSION" root))))
          (gpu (eq :gpu (mx:device-type (mx:default-device))))
-         ;; bit-exact only with the kernels that made the fixtures
-         (exact (and gpu (string= fixture-version (mx:version)))))
+         ;; bit-exact only with the kernels that made the fixtures: same MLX
+         ;; version, same Apple GPU generation ($MLX_CL_TEST_EXACT asserts it)
+         (exact (and gpu (exact-generation-p) (string= fixture-version (mx:version)))))
     (dolist (name '("qwen3" "mixtral" "qwen2_moe" "qwen3_moe" "olmoe" "mixtral-4bit"))
       (let* ((dir (merge-pathnames (format nil "~A/" name) root))
              (model (llm:load-model dir :tokenizer nil))

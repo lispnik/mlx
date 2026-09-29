@@ -377,6 +377,51 @@
    :handler #'download-handler))
 
 ;;; ------------------------------------------------------------------
+;;; lisp: a model writes, runs and repairs Common Lisp
+
+(defparameter *default-lisp-model* "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+
+(defun lisp-handler (cmd)
+  (let ((task (format nil "~{~A~^ ~}" (clingon:command-arguments cmd))))
+    (when (zerop (length task)) (clingon:print-usage-and-exit cmd *error-output*))
+    (with-mlx-errors
+      (let ((model (progn (format *error-output* "~&Loading ~A...~%" (clingon:getopt cmd :model))
+                          (llm:load-model (clingon:getopt cmd :model)))))
+        (multiple-value-bind (code ok result attempts)
+            (llm:write-lisp model task
+                            :tests (clingon:getopt cmd :tests)
+                            :attempts (clingon:getopt cmd :attempts)
+                            :timeout (clingon:getopt cmd :timeout)
+                            :isolation (if (clingon:getopt cmd :in-process) :in-process :process)
+                            :stream (and (clingon:getopt cmd :verbose) *standard-output*))
+          (format t "~&~A~%" code)
+          (format *error-output* "~&;; ~:[failed after ~D attempt~:P~;works (attempt ~D)~]~@[: ~A~]~%"
+                  ok attempts (and (not ok) (or (getf result :error) (first (getf result :failures)))))
+          (unless ok (uiop:quit 1)))))))
+
+(defun lisp-command ()
+  (clingon:make-command
+   :name "lisp"
+   :description "have a model write Common Lisp, run it against tests, and repair it"
+   :usage "[options] TASK..."
+   :options (list (clingon:make-option :string :long-name "model" :short-name #\m :key :model
+                                               :description "model (a coder model works best)"
+                                               :initial-value *default-lisp-model*)
+                  (clingon:make-option :list :long-name "test" :short-name #\T :key :tests
+                                             :description "a form that must return true (repeatable)")
+                  (clingon:make-option :integer :long-name "attempts" :short-name #\a :key :attempts
+                                                :description "tries before giving up" :initial-value 4)
+                  (clingon:make-option :integer :long-name "timeout" :key :timeout
+                                                :description "seconds allowed per evaluation" :initial-value 10)
+                  (clingon:make-option :flag :long-name "in-process" :key :in-process
+                                             :description "evaluate in this process instead of a child SBCL")
+                  (clingon:make-option :flag :long-name "verbose" :short-name #\v :key :verbose
+                                             :description "show every attempt and its result"))
+   :examples '(("Write and test a function:" .
+                "mlx-cl lisp -v 'Define (flatten tree) returning the atoms of a nested list in order' -T '(equal (flatten (quote (1 (2 (3)) 4))) (quote (1 2 3 4)))'"))
+   :handler #'lisp-handler))
+
+;;; ------------------------------------------------------------------
 
 (defun top-level-command ()
   (clingon:make-command
@@ -388,7 +433,7 @@
    :handler (lambda (cmd) (clingon:print-usage-and-exit cmd t))
    :sub-commands (list (info-command) (eval-command) (bench-command)
                        (inspect-command) (train-command)
-                       (generate-command) (chat-command) (download-command))))
+                       (generate-command) (chat-command) (download-command) (lisp-command))))
 
 (defun main ()
   (clingon:run (top-level-command)))

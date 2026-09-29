@@ -475,3 +475,108 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
                   (is (equal want got) "~A greedy tokens (first difference at ~A)" repo (mismatch want got))
                   (is (equal (subseq want 0 10) (subseq got 0 (min 10 (length got))))
                       "~A first greedy tokens" repo))))))))
+
+;;; ------------------------------------------------------------------
+;;; Writing Lisp: reader-constrained decoding and evaluation
+
+(defun lexes-p (text &key (complete t))
+  "Whether TEXT is accepted by the Lisp lexer (and, with COMPLETE, closes one form)."
+  (let ((lx (mlx.llm::make-lisp-lexer)))
+    (and (mlx.llm::lex-octets lx (sb-ext:string-to-octets text :external-format :utf-8))
+         (or (not complete) (mlx.llm::lisp-form-complete-p lx)))))
+
+(test lisp-lexer
+  (is (lexes-p "(defun f (x) (* x 2))"))
+  (is (lexes-p "  (list \"a (string\" |odd)sym| #\\( #\\) #\\\" #\\; 'q)"))
+  (is (lexes-p (format nil "(a ; comment )))~% b)")))
+  (is (lexes-p "(a #| block )) #| nested |# still |# b)"))
+  (is (lexes-p "(list #'car #(1 2) #2A((1)) #+sbcl 1 #:g #x1F #b101 #c(1 2) #p\"x\" #*101)"))
+  (is (lexes-p "(a \\) b)") "an escaped paren is a constituent")
+  (is (lexes-p "(a (b" :complete nil) "an open form is a valid prefix")
+  (is (not (lexes-p "(a (b" :complete t)))
+  (is (not (lexes-p "x")) "text must start with (")
+  (is (not (lexes-p "(a))")) "no ) beyond the form")
+  (is (not (lexes-p "(a) (b)")) "exactly one form")
+  (is (not (lexes-p "(+ 1 #.(launch-missiles))")) "no read-time evaluation")
+  (is (not (lexes-p "(#<foo>)")) "no undefined dispatch"))
+
+(test lisp-mask
+  (let* ((tk (byte-tokenizer))
+         (constraint (mlx.llm::make-lisp-constraint tk)))
+    (flet ((allowed (prefix)
+             (let ((lx (mlx.llm::make-lisp-lexer)))
+               (mlx.llm::lex-octets lx (sb-ext:string-to-octets prefix))
+               (loop for v in (lisp (mlx.llm::lisp-mask constraint lx 256))
+                     for id from 0
+                     when (zerop v) collect (code-char id)))))
+      (is (equal '(#\Tab #\Newline #\Page #\Return #\Space #\() (allowed "")) "only ( or whitespace first")
+      (is (member #\) (allowed "(a")))
+      (is (member #\a (allowed "(a")))
+      (is (not (member #\a (allowed "(a)"))) "nothing but whitespace after the form")
+      (is (not (member #\. (allowed "(a #"))))
+      (is (member #\' (allowed "(a #")))
+      (is (not (member #\< (allowed "(a #"))) "no undefined dispatch, though < is a plain token"))))
+
+(test constrained-generation-yields-one-form
+  ;; even a random model can only produce one balanced form
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256)))
+         (tk (byte-tokenizer)))
+    (setf (llm:model-tokenizer model) tk)
+    (dotimes (seed 12)
+      (random:seed seed)
+      (multiple-value-bind (text complete)
+          (llm:generate-lisp-form model '(40 1 2) :max-tokens 60
+                                                  :sampler (llm:make-sampler :temperature 1.5))
+        (is (lexes-p text :complete complete) "seed ~D: ~S" seed text)
+        ;; an unfinished form may even be empty: whitespace spent the budget
+        (when complete (is (char= #\( (char text 0))))))))
+
+(test evaluating-lisp
+  (dolist (isolation '(:process :in-process))
+    (let ((ok (llm:evaluate-lisp "(defun sq (x) (* x x))" :tests '("(= (sq 4) 16)") :isolation isolation))
+          (bad (llm:evaluate-lisp "(defun sq (x) (+ x x))" :tests '("(= (sq 3) 9)") :isolation isolation))
+          (err (llm:evaluate-lisp "(car 5)" :isolation isolation))
+          (out (llm:evaluate-lisp "(progn (princ \"hi\") 42)" :isolation isolation))
+          (slow (llm:evaluate-lisp "(loop)" :timeout 1 :isolation isolation)))
+      (is (getf ok :ok))
+      (is (not (getf bad :ok)))
+      (is (equal '("(= (SQ 3) 9): (SQ 3) returned 6, expected 9") (getf bad :failures)))
+      (is (search "TYPE-ERROR" (getf err :error)))
+      (is (equal "hi" (getf out :output)))
+      (is (equal "42" (getf out :value)))
+      (is (search "timed out" (getf slow :error)))
+      ;; storage conditions are caught too, and reported briefly
+      (let ((deep (llm:evaluate-lisp "(defun f (x) (1+ (f x)))" :tests '("(f 1)") :isolation isolation)))
+        (is (search "CONTROL-STACK-EXHAUSTED" (getf deep :error))))
+      (let ((undefined (llm:evaluate-lisp "(split-words \"a b\")" :isolation isolation)))
+        (is (search "The function SPLIT-WORDS is undefined" (getf undefined :error))
+            "no sandbox package prefix: ~S" (getf undefined :error)))
+      ;; each evaluation starts in a fresh package
+      (is (not (getf (llm:evaluate-lisp "(sq 2)" :isolation isolation) :ok)))))
+  (is (search "tests failed" (mlx.llm::feedback '(:ok nil :failures ("x")))))
+  (is (< (length (mlx.llm::feedback (list :ok nil :error (make-string 100000 :initial-element #\x)))) 1000)
+      "long errors are clipped"))
+
+(test closing-text
+  (flet ((closed (prefix)
+           (let ((lx (mlx.llm::make-lisp-lexer)))
+             (is (mlx.llm::lex-octets lx (map 'vector #'char-code prefix)))
+             (concatenate 'string prefix (mlx.llm::closing-text lx)))))
+    (is (string= "(a (b c))" (closed "(a (b c")))
+    (is (lexes-p (closed "(a \"str")))
+    (is (lexes-p (closed "(a |sym")))
+    (is (lexes-p (closed "(a ; comment")))
+    (is (lexes-p (closed "(a #| block")))))
+
+(test indentation-parens
+  (let ((repair #'mlx.llm::indentation-parens))
+    ;; closers miscounted: the ASSERTs were swallowed by the DEFUN
+    (is (string= (format nil "(progn~%  (defun f (x)~%    (list x))~%  (assert (f 1)))")
+                 (funcall repair (format nil "(progn~%  (defun f (x)~%    (list x)~%  (assert (f 1)))))"))))
+    ;; closers on lines of their own are folded in; a missing final one is added
+    (is (string= (format nil "(defun k ()~%  (list 1~%        2))")
+                 (funcall repair (format nil "(defun k ()~%  (list 1~%        2~%  )"))))
+    ;; well-indented code is unchanged, strings, characters and comments included
+    (dolist (code (list "(defun g (x) (* x 2))"
+                        (format nil "(defun f (x)~%  (let ((a #\\()~%        (b \"a ( string~%with ) parens\"))~%    (list a b) ; comment )~%    #| block ( |#~%    (+ a x)))")))
+      (is (string= code (funcall repair code)) "changed: ~S" code))))

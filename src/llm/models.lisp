@@ -1,7 +1,8 @@
 ;;;; llm/models.lisp -- decoder-only transformers of the Llama lineage
 ;;;;
 ;;;; One configurable implementation covers Hugging Face model types llama,
-;;;; mistral, qwen2, phi3, gemma2 and gemma3_text.  An ARCH struct, derived
+;;;; mistral, qwen2, qwen3, phi3, gemma2, gemma3_text, and the mixture-of-
+;;;; experts types mixtral, qwen2_moe, qwen3_moe and olmoe.  An ARCH struct, derived
 ;;;; from config.json, records how a family departs from Llama: norm style,
 ;;;; fused projections, MLP activation, embedding scaling, soft-capping,
 ;;;; sliding windows...  Each variation follows mlx-lm's implementation of
@@ -24,7 +25,10 @@
   (embed-scale nil)       ; multiply embeddings by sqrt(hidden): t, or :bf16 to
                           ; round the factor to bfloat16 first (Gemma 3)
   (clip-residual nil)     ; float16 residual adds in float32, clipped (Gemma 3)
-  (qk-norm nil)           ; per-head RMSNorm of queries and keys (Gemma 3)
+  (qk-norm nil)           ; RMSNorm of queries and keys: :gemma3 (per head, after
+                          ; the transpose), :per-head (before it, Qwen3) or
+                          ; :full (over all heads, before the reshape, OLMoE)
+  (moe nil)               ; mixture-of-experts plist, see CONFIG-MOE
   (four-norms nil)        ; pre/post norms around both attention and MLP (Gemma 2/3)
   (fused-qkv nil)         ; one qkv_proj (Phi-3)
   (fused-gate-up nil)     ; one gate_up_proj (Phi-3)
@@ -35,7 +39,42 @@
   (sliding-pattern nil)   ; every Nth layer is global
   (qkv-bias nil) (o-bias nil) (mlp-bias nil))
 
-(defparameter *supported-model-types* '("llama" "mistral" "qwen2" "phi3" "gemma2" "gemma3_text"))
+(defparameter *supported-model-types*
+  '("llama" "mistral" "qwen2" "qwen3" "phi3" "gemma2" "gemma3_text"
+    "mixtral" "qwen2_moe" "qwen3_moe" "olmoe"))
+
+(defun config-moe (config type)
+  "The mixture-of-experts description for TYPE, or NIL.  :ROUTING says how
+experts are chosen, as each family does in mlx-lm:
+  :mixtral        top-k of the router logits, then a softmax over those k
+  :softmax-first  softmax over all experts, then top-k (argpartition of -p)
+  :qwen3          softmax, then top-k from the other end (argpartition of p)"
+  (flet ((cfg (key &optional default) (config-get config key default)))
+    (cond
+      ((equal type "mixtral")
+       (list :name "block_sparse_moe" :routing :mixtral :experts (cfg "num_local_experts")
+             :top-k (cfg "num_experts_per_tok") :hidden (cfg "intermediate_size")))
+      ((equal type "olmoe")
+       (list :name "mlp" :routing :softmax-first :experts (cfg "num_experts")
+             :top-k (cfg "num_experts_per_tok") :hidden (cfg "intermediate_size")
+             :norm-topk (cfg "norm_topk_prob") :flatten t :bias (cfg "mlp_bias")))
+      ((equal type "qwen2_moe")
+       (list :name "mlp" :routing :softmax-first :experts (cfg "num_experts")
+             :top-k (cfg "num_experts_per_tok") :hidden (cfg "moe_intermediate_size")
+             :shared (cfg "shared_expert_intermediate_size")))
+      ((equal type "qwen3_moe")
+       (list :name "mlp" :routing :qwen3 :experts (cfg "num_experts")
+             :top-k (cfg "num_experts_per_tok") :hidden (cfg "moe_intermediate_size")
+             :norm-topk (cfg "norm_topk_prob") :sparse-step (cfg "decoder_sparse_step" 1)
+             :mlp-only (coerce (cfg "mlp_only_layers" #()) 'list))))))
+
+(defun moe-layer-p (arch index)
+  "Whether layer INDEX is a mixture-of-experts layer (else a dense MLP)."
+  (let ((moe (arch-moe arch)))
+    (and moe
+         (not (member index (getf moe :mlp-only)))
+         (plusp (getf moe :experts))
+         (zerop (mod (1+ index) (getf moe :sparse-step 1))))))
 
 (defun config-arch (config)
   (let ((type (config-get config "model_type")))
@@ -46,7 +85,10 @@
                  :norm-offset gemma
                  :embed-scale (and gemma (if (equal type "gemma3_text") :bf16 t))
                  :clip-residual (equal type "gemma3_text")
-                 :qk-norm (equal type "gemma3_text")
+                 :qk-norm (cond ((equal type "gemma3_text") :gemma3)
+                                ((member type '("qwen3" "qwen3_moe") :test #'equal) :per-head)
+                                ((equal type "olmoe") :full))
+                 :moe (config-moe config type)
                  :four-norms gemma
                  :fused-qkv (equal type "phi3")
                  :fused-gate-up (equal type "phi3")
@@ -55,8 +97,10 @@
                  :final-softcap (and (equal type "gemma2") (config-get config "final_logit_softcapping" 30.0))
                  :sliding-window (and (equal type "gemma3_text") (config-get config "sliding_window" 512))
                  :sliding-pattern (and (equal type "gemma3_text") (config-get config "sliding_window_pattern" 6))
-                 :qkv-bias (or (equal type "qwen2") (config-get config "attention_bias" nil))
-                 :o-bias (and (not (equal type "qwen2")) (config-get config "attention_bias" nil))
+                 :qkv-bias (or (member type '("qwen2" "qwen2_moe") :test #'equal)
+                               (config-get config "attention_bias" nil))
+                 :o-bias (and (not (member type '("qwen2" "qwen2_moe") :test #'equal))
+                              (config-get config "attention_bias" nil))
                  :mlp-bias (config-get config "mlp_bias" nil)))))
 
 (defun head-dim (config)
@@ -234,9 +278,10 @@ with WINDOW, OFFSET+i < j + WINDOW) -- mlx-lm's create_causal_mask."
           (nn:register m :v-proj (nn:linear dim (* kv-heads head-dim) :bias (arch-qkv-bias arch)))))
     (nn:register m :o-proj (nn:linear (* heads head-dim) dim :bias (arch-o-bias arch)))
     (when (arch-qk-norm arch)
-      (let ((eps (config-get config "rms_norm_eps" 1e-6)))
-        (nn:register m :q-norm (make-norm head-dim eps arch))
-        (nn:register m :k-norm (make-norm head-dim eps arch))))
+      (let ((eps (config-get config "rms_norm_eps" 1e-6))
+            (full (eq (arch-qk-norm arch) :full)))
+        (nn:register m :q-norm (make-norm (if full (* heads head-dim) head-dim) eps arch))
+        (nn:register m :k-norm (make-norm (if full (* kv-heads head-dim) head-dim) eps arch))))
     m))
 
 (defun dtype-min (dtype)
@@ -268,7 +313,14 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
     (with-slots (arch heads kv-heads head-dim scale rotary window) m
       (destructuring-bind (b len dim) (mx:shape x)
         (declare (ignore dim))
-        (flet ((heads-first (y n) (mx:transpose (mx:reshape y (list b len n head-dim)) :axes '(0 2 1 3))))
+        (flet ((heads-first (y n &optional norm)
+                 ;; (B L n*D) -> (B n L D), normalizing where the family does
+                 (let* ((qk (arch-qk-norm arch))
+                        (y (if (and norm (eq qk :full)) (funcall (nn:child m norm) y) y))
+                        (y (mx:reshape y (list b len n head-dim)))
+                        (y (if (and norm (eq qk :per-head)) (funcall (nn:child m norm) y) y))
+                        (y (mx:transpose y :axes '(0 2 1 3))))
+                   (if (and norm (eq qk :gemma3)) (funcall (nn:child m norm) y) y))))
           (multiple-value-bind (q k v)
               (if (arch-fused-qkv arch)
                   (destructuring-bind (q k v)
@@ -277,11 +329,9 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
                     (values q k v))
                   (values (funcall (nn:child m :q-proj) x) (funcall (nn:child m :k-proj) x)
                           (funcall (nn:child m :v-proj) x)))
-            (let* ((q (heads-first q heads))
-                   (k (heads-first k kv-heads))
+            (let* ((q (heads-first q heads :q-norm))
+                   (k (heads-first k kv-heads :k-norm))
                    (v (heads-first v kv-heads))
-                   (q (if (arch-qk-norm arch) (funcall (nn:child m :q-norm) q) q))
-                   (k (if (arch-qk-norm arch) (funcall (nn:child m :k-norm) k) k))
                    (offset (kv-cache-offset cache))
                    (q (funcall rotary q offset))
                    (k (funcall rotary k offset)))
@@ -308,9 +358,9 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
 
 (nn:defmodule mlp () ((arch :initarg :arch)))
 
-(defun make-mlp (config arch)
+(defun make-mlp (config arch &optional hidden)
   (let ((dim (config-get config "hidden_size"))
-        (hidden (config-get config "intermediate_size"))
+        (hidden (or hidden (config-get config "intermediate_size")))
         (bias (arch-mlp-bias arch))
         (m (make-instance 'mlp :arch arch)))
     (if (arch-fused-gate-up arch)
@@ -319,12 +369,6 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
                (nn:register m :up-proj (nn:linear dim hidden :bias bias))))
     (nn:register m :down-proj (nn:linear hidden dim :bias bias))
     m))
-
-(defun swiglu (gate x)
-  "silu(gate) * x as one fused kernel (as mlx-lm computes it)."
-  (funcall (mlx.nn.impl::compiled 'swiglu
-                                  (lambda (gate x) (mx:multiply (mx:multiply gate (mx:sigmoid gate)) x)))
-           gate x))
 
 (defmethod nn:forward ((m mlp) &rest args)
   (destructuring-bind (x) args
@@ -336,17 +380,79 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
               (values (funcall (nn:child m :gate-proj) x) (funcall (nn:child m :up-proj) x)))
         (funcall (nn:child m :down-proj)
                  (ecase (arch-activation arch)
-                   (:silu (swiglu gate up))
+                   (:silu (nn:swiglu gate up))
                    (:gelu-approx (mx:multiply (nn:gelu-approx gate) up))))))))
 
-(nn:defmodule transformer-block () ((arch :initarg :arch)))
+;;; Mixture of experts: a router picks TOP-K experts per token; their outputs
+;;; are combined with the routing weights (mlx-lm's *SparseMoeBlock classes)
+
+(nn:defmodule moe-block () ((moe :initarg :moe)))
+
+(defun make-moe-block (config arch)
+  (let* ((moe (arch-moe arch))
+         (dim (config-get config "hidden_size"))
+         (m (make-instance 'moe-block :moe moe)))
+    (nn:register m "gate" (nn:linear dim (getf moe :experts) :bias nil))
+    (nn:register m "switch_mlp" (nn:switch-glu dim (getf moe :hidden) (getf moe :experts)
+                                               :bias (getf moe :bias)))
+    (when (getf moe :shared)
+      (nn:register m "shared_expert" (make-mlp config arch (getf moe :shared)))
+      (nn:register m "shared_expert_gate" (nn:linear dim 1 :bias nil)))
+    m))
+
+(defun first-k (a k)
+  "A[..., :k]"
+  (apply #'mx:ref a (append (make-list (1- (mx:ndim a)) :initial-element t) (list (list 0 k)))))
+
+(defun last-k (a k)
+  "A[..., -k:]"
+  (apply #'mx:ref a (append (make-list (1- (mx:ndim a)) :initial-element t) (list (list (- k) nil)))))
+
+(defun route (moe gates)
+  "Returns (values expert-indices scores) for router logits GATES."
+  (let ((k (getf moe :top-k)))
+    (flet ((normalized (scores)
+             (if (getf moe :norm-topk)
+                 (mx:divide scores (mx:sum scores :axis -1 :keepdims t))
+                 scores)))
+      (ecase (getf moe :routing)
+        (:mixtral
+         (let* ((inds (mx:stop-gradient (first-k (mx:argpartition (mx:negative gates) (1- k) :axis -1) k)))
+                (scores (mx:take-along-axis gates inds -1)))
+           (values inds (mx:softmax scores :axis -1 :precise t))))
+        (:softmax-first
+         (let* ((probs (mx:softmax gates :axis -1 :precise t))
+                (inds (mx:stop-gradient (first-k (mx:argpartition (mx:negative probs) (1- k) :axis -1) k))))
+           (values inds (normalized (mx:take-along-axis probs inds -1)))))
+        (:qwen3
+         (let* ((probs (mx:softmax gates :axis -1 :precise t))
+                (inds (last-k (mx:argpartition probs (- k) :axis -1) k)))
+           (values inds (normalized (mx:take-along-axis probs inds -1)))))))))
+
+(defmethod nn:forward ((m moe-block) &rest args)
+  (destructuring-bind (x) args
+    (let* ((moe (slot-value m 'moe))
+           (shape (mx:shape x))
+           (x (if (getf moe :flatten) (mx:reshape x (list -1 (car (last shape)))) x)))
+      (multiple-value-bind (inds scores) (route moe (funcall (nn:child m "gate") x))
+        (let* ((y (funcall (nn:child m "switch_mlp") x inds))
+               (y (mx:sum (mx:multiply y (mx:expand-dims scores -1)) :axis -2))
+               (y (if (nn:child m "shared_expert")
+                      (mx:add y (mx:multiply (mx:sigmoid (funcall (nn:child m "shared_expert_gate") x))
+                                             (funcall (nn:child m "shared_expert") x)))
+                      y)))
+          (if (getf moe :flatten) (mx:reshape y shape) y))))))
+
+(nn:defmodule transformer-block () ((arch :initarg :arch) (ffn :initarg :ffn :initform "mlp")))
 
 (defun make-block (config arch index)
-  (let ((m (make-instance 'transformer-block :arch arch))
-        (dim (config-get config "hidden_size"))
-        (eps (config-get config "rms_norm_eps" 1e-5)))
+  (let* ((moe (moe-layer-p arch index))
+         (ffn (if moe (getf (arch-moe arch) :name) "mlp"))
+         (m (make-instance 'transformer-block :arch arch :ffn ffn))
+         (dim (config-get config "hidden_size"))
+         (eps (config-get config "rms_norm_eps" 1e-5)))
     (nn:register m :self-attn (make-attention config arch index))
-    (nn:register m :mlp (make-mlp config arch))
+    (nn:register m ffn (if moe (make-moe-block config arch) (make-mlp config arch)))
     (nn:register m :input-layernorm (make-norm dim eps arch))
     (nn:register m :post-attention-layernorm (make-norm dim eps arch))
     (when (arch-four-norms arch)
@@ -371,9 +477,9 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
         (if (arch-four-norms (slot-value m 'arch))
             (let ((h (funcall add x (funcall (c :post-attention-layernorm) attn))))
               (funcall add h (funcall (c :post-feedforward-layernorm)
-                                      (funcall (c :mlp) (funcall (c :pre-feedforward-layernorm) h)))))
+                                      (funcall (c (slot-value m 'ffn)) (funcall (c :pre-feedforward-layernorm) h)))))
             (let ((h (mx:add x attn)))
-              (mx:add h (funcall (c :mlp) (funcall (c :post-attention-layernorm) h)))))))))
+              (mx:add h (funcall (c (slot-value m 'ffn)) (funcall (c :post-attention-layernorm) h)))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; The model
@@ -433,9 +539,44 @@ logits (B L vocab) and advances CACHE."
 ;;; ------------------------------------------------------------------
 ;;; Loading
 
+(defparameter *expert-projections*
+  '(("w1" . "gate_proj") ("w2" . "down_proj") ("w3" . "up_proj")   ; Mixtral
+    ("gate_proj" . "gate_proj") ("up_proj" . "up_proj") ("down_proj" . "down_proj")))
+
+(defun expert-key (name)
+  "For a per-expert weight \"<prefix>.experts.<n>.<proj>.<suffix>\" (Hugging
+Face layout), return (values stacked-name n); else NIL."
+  (let ((p (search ".experts." name)))
+    (when p
+      (let* ((rest (subseq name (+ p 9)))
+             (dot (position #\. rest))
+             (n (and dot (parse-integer rest :end dot :junk-allowed t)))
+             (tail (and n (subseq rest (1+ dot))))
+             (proj-end (and tail (position #\. tail)))
+             (proj (and proj-end (cdr (assoc (subseq tail 0 proj-end) *expert-projections* :test #'string=)))))
+        (when proj
+          (values (format nil "~A.switch_mlp.~A~A" (subseq name 0 p) proj (subseq tail proj-end)) n))))))
+
 (defun sanitize-weights (alist)
-  "Drop checkpoint entries with no counterpart in the model."
-  (remove-if (lambda (e) (search "rotary_emb.inv_freq" (car e))) alist))
+  "Drop checkpoint entries with no counterpart in the model, and stack
+Hugging Face per-expert weights (experts.N.*) into the switch_mlp layout,
+as mlx-lm's sanitize does.  Some checkpoints, even mlx-community ones such
+as OLMoE's, keep the per-expert layout."
+  (let ((groups (make-hash-table :test 'equal)) (out '()))
+    (dolist (e alist)
+      (multiple-value-bind (stacked n) (expert-key (car e))
+        (cond ((search "rotary_emb.inv_freq" (car e)))
+              (stacked (push (cons n (cdr e)) (gethash stacked groups)))
+              (t (push e out)))))
+    (maphash (lambda (name experts)
+               (let ((parts (mapcar #'cdr (sort experts #'< :key #'car))))
+                 (push (cons name (mx:stack parts)) out)
+                 ;; the stack's graph holds what it needs; dropping our own
+                 ;; handles now lets MLX free each expert's copy once it is
+                 ;; stacked, instead of keeping both until a GC
+                 (mx:free parts)))
+             groups)
+    (nreverse out)))
 
 (defun load-weight-alist (dir)
   (sanitize-weights

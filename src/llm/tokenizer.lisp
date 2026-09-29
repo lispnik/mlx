@@ -41,6 +41,7 @@
    (chat-template :initarg :chat-template :initform nil :reader tokenizer-chat-template)
    (bos-token :initarg :bos-token :initform nil :reader bos-token)
    (bos-string :initarg :bos-string :initform nil :reader bos-string)
+   (eos-string :initarg :eos-string :initform nil :reader eos-string)
    (eos-tokens :initarg :eos-tokens :initform '() :accessor eos-tokens
                :documentation "ids that end generation")))
 
@@ -592,6 +593,7 @@ become their ids.  ADD-BOS prepends the beginning-of-sequence token."
                                                     decoders)
                          :chat-template (json-get config "chat_template")
                          :bos-string (config-token "bos_token")
+                         :eos-string (config-token "eos_token")
                          :bos-token (and (json-get config "add_bos_token")
                                          (gethash (config-token "bos_token") vocab))
                          :eos-tokens (let ((e (config-token "eos_token")))

@@ -28,9 +28,10 @@
 
 (defmethod nn:forward ((m nn:linear) &rest args)
   (destructuring-bind (x) args
-    (let ((y (mx:matmul x (mx:transpose (nn:child m "weight"))))
+    (let ((w (mx:transpose (nn:child m "weight")))
           (b (nn:child m "bias")))
-      (if b (mx:add y b) y))))
+      ;; as mlx.nn.Linear: a fused addmm, so the bias is added before rounding
+      (if b (mx:addmm b x w) (mx:matmul x w)))))
 
 (defmethod module-description ((m nn:linear))
   (with-slots (input-dims output-dims) m
@@ -414,21 +415,100 @@ weights (else they are random).  The quantized weights are frozen."
                          :biases (nn:child m "biases") :transpose t
                          :group-size group-size :bits bits :mode mode)))
 
+;;; Mixture-of-experts layers (mlx-lm's switch_layers): a stack of expert
+;;; weights, applied per token to the experts chosen by a router
+
+(nn:defmodule nn:switch-linear () ())
+
+(defun nn:switch-linear (input-dims output-dims num-experts &key (bias t))
+  "NUM-EXPERTS linear layers in one (experts out in) weight.  Called with
+(x indices &key sorted): each row of X goes through the experts INDICES names."
+  (let ((m (make-instance 'nn:switch-linear))
+        (scale (sqrt (/ 1.0 input-dims))))
+    (nn:register m "weight" (uniform-init (list num-experts output-dims input-dims) scale))
+    (when bias (nn:register m "bias" (mx:zeros (list num-experts output-dims))))
+    m))
+
+(defun add-expert-bias (m x indices)
+  (let ((b (nn:child m "bias")))
+    (if b (mx:add x (mx:expand-dims (mx:take b indices :axis 0) -2)) x)))
+
+(defmethod nn:forward ((m nn:switch-linear) &rest args)
+  (destructuring-bind (x indices &key sorted) args
+    (add-expert-bias m (mx:gather-mm x (mx:swapaxes (nn:child m "weight") -1 -2)
+                                     :rhs-indices indices :sorted-indices sorted)
+                     indices)))
+
+(nn:defmodule nn:quantized-switch-linear ()
+  ((group-size :initarg :group-size) (bits :initarg :bits) (mode :initarg :mode)))
+
+(defun nn:quantized-switch-linear (&key from (group-size 64) (bits 4) (mode "affine"))
+  "A SWITCH-LINEAR with quantized expert weights, made FROM a switch-linear."
+  (let ((m (make-instance 'nn:quantized-switch-linear :group-size group-size :bits bits :mode mode)))
+    (quantize-into m (nn:child from "weight") group-size bits mode)
+    (when (nn:child from "bias") (nn:register m "bias" (nn:child from "bias")))
+    m))
+
+(defmethod nn:forward ((m nn:quantized-switch-linear) &rest args)
+  (destructuring-bind (x indices &key sorted) args
+    (with-slots (group-size bits mode) m
+      (add-expert-bias m (mx:gather-qmm x (nn:child m "weight") (nn:child m "scales")
+                                        :biases (nn:child m "biases") :rhs-indices indices
+                                        :transpose t :group-size group-size :bits bits :mode mode
+                                        :sorted-indices sorted)
+                       indices))))
+
+(defun nn:swiglu (gate x)
+  "silu(GATE) * X as one fused kernel, as mlx-lm computes it."
+  (funcall (compiled 'nn:swiglu (lambda (gate x) (mx:multiply (mx:multiply gate (mx:sigmoid gate)) x)))
+           gate x))
+
+(nn:defmodule nn:switch-glu () ())
+
+(defun nn:switch-glu (input-dims hidden-dims num-experts &key bias)
+  "A SwiGLU MLP per expert.  Called with (x indices), INDICES (..., k)
+naming each token's experts; returns (..., k, input-dims)."
+  (let ((m (make-instance 'nn:switch-glu)))
+    (nn:register m "gate_proj" (nn:switch-linear input-dims hidden-dims num-experts :bias bias))
+    (nn:register m "up_proj" (nn:switch-linear input-dims hidden-dims num-experts :bias bias))
+    (nn:register m "down_proj" (nn:switch-linear hidden-dims input-dims num-experts :bias bias))
+    m))
+
+(defmethod nn:forward ((m nn:switch-glu) &rest args)
+  (destructuring-bind (x indices) args
+    (let* ((x (mx:expand-dims x '(-2 -3)))
+           ;; with many tokens, group them by expert so weights are read in order
+           (sort (>= (mx:size indices) 64))
+           (k (mx:dim indices -1))
+           (flat (and sort (mx:flatten indices)))
+           (order (and sort (mx:argsort flat)))
+           (inverse (and sort (mx:argsort order)))
+           (x (if sort (mx:take (mx:flatten x :start-axis 0 :end-axis -3) (mx:floor-divide order k) :axis 0) x))
+           (idx (if sort (mx:take flat order :axis 0) indices))
+           (idx (if (nn:training-p m) (mx:stop-gradient idx) idx))
+           (up (funcall (nn:child m "up_proj") x idx :sorted sort))
+           (gate (funcall (nn:child m "gate_proj") x idx :sorted sort))
+           (y (funcall (nn:child m "down_proj") (nn:swiglu gate up) idx :sorted sort))
+           (y (if sort (mx:unflatten (mx:take y inverse :axis 0) 0 (mx:shape indices)) y)))
+      (mx:squeeze y :axis -2))))
+
 (defun nn:quantize (model &key (group-size 64) (bits 4) (mode "affine") (predicate (constantly t)))
-  "Replace MODEL's LINEAR and EMBEDDING layers (for which PREDICATE, called
-with (path module), is true) by quantized versions, in place.  Layers whose
+  "Replace MODEL's LINEAR, EMBEDDING and SWITCH-LINEAR layers (for which
+PREDICATE, called with (path module), is true) by quantized versions, in place.  Layers whose
 input size is not a multiple of GROUP-SIZE are left alone.  Returns MODEL."
   (let ((replacements '()))
     (nn:apply-to-modules
      (lambda (path m)
-       (let ((w (and (typep m '(or nn:linear nn:embedding)) (nn:child m "weight"))))
+       (let ((w (and (typep m '(or nn:linear nn:embedding nn:switch-linear)) (nn:child m "weight"))))
          (when (and w (zerop (mod (car (last (mx:shape w))) group-size))
                     (funcall predicate path m))
            (push (cons path (etypecase m
                               (nn:linear (nn:quantized-linear 0 0 :group-size group-size :bits bits
                                                                   :mode mode :from m))
                               (nn:embedding (nn:quantized-embedding 0 0 :group-size group-size
-                                                                        :bits bits :mode mode :from m))))
+                                                                        :bits bits :mode mode :from m))
+                              (nn:switch-linear (nn:quantized-switch-linear :from m :group-size group-size
+                                                                            :bits bits :mode mode))))
                  replacements))))
      model)
     (loop for (path . new) in replacements

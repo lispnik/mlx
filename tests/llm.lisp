@@ -249,6 +249,100 @@ followed by single-token steps through the cache."
     (is (eq :bf16 (mlx.llm::arch-embed-scale arch))))
   (signals error (mlx.llm::make-causal-lm (tiny-config "model_type" "mamba"))))
 
+(test switch-layers
+  (random:seed 5)
+  (let* ((sl (nn:switch-linear 8 6 4 :bias t))
+         (x (random:normal :shape '(3 1 8)))
+         (idx (mx:from-lisp '((0 2) (3 3) (1 0)) :dtype :uint32))
+         (y (funcall sl (mx:expand-dims x -2) idx)))
+    (is (equal '(3 2 1 6) (mx:shape y)))
+    ;; each (token, slot) equals the chosen expert's plain linear map
+    (loop for tk below 3
+          do (loop for slot below 2
+                   for e = (mx:item (mx:ref idx tk slot))
+                   do (is (close-enough (mx:ref y tk slot 0)
+                                        (mx:add (mx:matmul (mx:ref x tk 0) (mx:transpose (mx:ref (nn:child sl "weight") e)))
+                                                (mx:ref (nn:child sl "bias") e)))
+                           "token ~D slot ~D" tk slot))))
+  ;; SwitchGLU: sorted dispatch (>= 64 indices) and unsorted agree
+  (let* ((glu (nn:switch-glu 16 8 8))
+         (x (random:normal :shape '(20 16)))
+         (idx (mx:astype (random:randint 0 8 :shape '(20 4)) :uint32))
+         (sorted (funcall glu x idx))
+         (unsorted (mx:concatenate (loop for i below 20 collect (funcall glu (mx:ref x (list i (1+ i))) (mx:ref idx (list i (1+ i))))))))
+    (is (equal '(20 4 16) (mx:shape sorted)))
+    (is (close-enough sorted unsorted)))
+  ;; quantizing converts switch layers too
+  (let ((m (nn:sequential (nn:switch-linear 64 32 4))))
+    (nn:quantize m)
+    (is (typep (first (nn:child m "layers")) 'nn:quantized-switch-linear))))
+
+(defun close-enough (a b &optional (tol 1e-3))
+  (< (mx:item (mx:max (mx:abs (mx:subtract (mx:astype a :float32) (mx:astype b :float32))))) tol))
+
+(test moe-configuration
+  (let* ((config (tiny-config "model_type" "qwen3_moe" "num_experts" 4 "num_experts_per_tok" 2
+                              "moe_intermediate_size" 16 "decoder_sparse_step" 1
+                              "mlp_only_layers" #(1) "head_dim" 16))
+         (model (mlx.llm::make-causal-lm config))
+         (layers (nn:child (nn:child model :model) :layers)))
+    (is (typep (nn:child (first layers) "mlp") 'mlx.llm::moe-block))
+    (is (typep (nn:child (second layers) "mlp") 'mlx.llm::mlp) "mlp_only_layers stay dense"))
+  (let ((mixtral (mlx.llm::make-causal-lm (tiny-config "model_type" "mixtral" "num_local_experts" 4
+                                                        "num_experts_per_tok" 2))))
+    (is (nn:child (first (nn:child (nn:child mixtral :model) :layers)) "block_sparse_moe"))))
+
+(test hugging-face-expert-weights-are-stacked
+  (let* ((alist (loop for e below 3
+                      nconc (loop for (w . n) in '(("w1" . 1) ("w2" . 2) ("w3" . 3))
+                                  collect (cons (format nil "model.layers.0.block_sparse_moe.experts.~D.~A.weight" e w)
+                                                (mx:full '(2 2) (+ (* 10 e) n))))))
+         (stacked (mlx.llm::sanitize-weights (append alist (list (cons "model.norm.weight" (mx:ones '(2))))))))
+    (is (= 4 (length stacked)))
+    (let ((gate (cdr (assoc "model.layers.0.block_sparse_moe.switch_mlp.gate_proj.weight" stacked :test #'string=)))
+          (down (cdr (assoc "model.layers.0.block_sparse_moe.switch_mlp.down_proj.weight" stacked :test #'string=))))
+      (is (equal '(3 2 2) (mx:shape gate)))
+      (is (equal '(1 11 21) (mapcar (lambda (e) (round (mx:item (mx:ref gate e 0 0)))) '(0 1 2))) "w1 -> gate_proj, in expert order")
+      (is (= 2 (round (mx:item (mx:ref down 0 0 0)))) "w2 -> down_proj")
+      ;; the per-expert arrays are released once stacked: holding both
+      ;; doubled the memory needed to load OLMoE (7.5 GB instead of 3.9)
+      (is (every (lambda (e) (mx:freed-p (cdr e))) alist)))))
+
+;;; Tiny random models made by mlx-lm (tools/make-model-fixtures.py): the
+;;; same weights must give mlx-lm's logits
+
+(defparameter *tiny-tokens* '(5 17 3 42 8 60 1 33 21 9 50 12 7 44 2 30))
+
+(test tiny-models-match-mlx-lm
+  (let* ((root (asdf:system-relative-pathname "mlx" "tests/fixtures/tiny/"))
+         (fixture-version (string-trim '(#\Newline) (uiop:read-file-string (merge-pathnames "MLX_VERSION" root))))
+         (gpu (eq :gpu (mx:device-type (mx:default-device))))
+         ;; bit-exact only with the kernels that made the fixtures
+         (exact (and gpu (string= fixture-version (mx:version)))))
+    (dolist (name '("qwen3" "mixtral" "qwen2_moe" "qwen3_moe" "olmoe" "mixtral-4bit"))
+      (let* ((dir (merge-pathnames (format nil "~A/" name) root))
+             (model (llm:load-model dir :tokenizer nil))
+             (unquantized-moe (and (not (search "4bit" name)) (not (string= name "qwen3")))))
+        (if (and (not gpu) unquantized-moe)
+            ;; MLX's CPU gather_mm supports only float32 weights
+            (skip "~A: bf16 experts need the GPU" name)
+            (let* ((full (mx:ref (funcall model (mx:from-lisp (list *tiny-tokens*) :dtype :int32)
+                                          (llm:make-cache model))
+                                 0))
+                   (cache (llm:make-cache model))
+                   (rows (list (mx:ref (funcall model (mx:from-lisp (list (subseq *tiny-tokens* 0 12)) :dtype :int32)
+                                                cache)
+                                       0 -1))))
+              (dolist (id (subseq *tiny-tokens* 12 15))
+                (push (mx:ref (funcall model (mx:from-lisp (list (list id)) :dtype :int32) cache) 0 -1) rows))
+              (loop for (what ours file) in `(("full pass" ,full "logits-full.npy")
+                                              ("incremental" ,(mx:stack (nreverse rows)) "logits-incremental.npy"))
+                    for diff = (mx:item (mx:max (mx:abs (mx:subtract (mx:astype ours :float32)
+                                                                     (mx:load (merge-pathnames file dir))))))
+                    do (if exact
+                           (is (zerop diff) "~A ~A differs from mlx-lm by ~A" name what diff)
+                           (is (< diff 0.25) "~A ~A differs from mlx-lm by ~A" name what diff)))))))))
+
 (test causal-mask-windows
   (is (equal '((t nil nil) (t t nil) (t t t)) (lisp (mlx.llm::causal-mask 3 0))))
   (is (equal '((t t t nil) (t t t t)) (lisp (mlx.llm::causal-mask 2 2))))
@@ -343,15 +437,20 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
 
 ;;; ------------------------------------------------------------------
 ;;; More model families against mlx-lm (opt-in: $MLX_CL_TEST_ALL_MODELS,
-;;; ~5 GB of downloads: Qwen2.5, Llama 3.2, Gemma 2, Gemma 3, Phi-3.5)
+;;; ~9 GB of downloads: Qwen2.5, Qwen3, Llama 3.2, Gemma 2, Gemma 3,
+;;; Phi-3.5, OLMoE)
 
 (test model-families-match-mlx-lm
   (if (not (let ((v (uiop:getenv "MLX_CL_TEST_ALL_MODELS"))) (and v (plusp (length v)))))
-      (skip "set MLX_CL_TEST_ALL_MODELS to test Qwen2.5, Llama 3.2, Gemma 2/3 and Phi-3.5")
-      (let ((models (make-hash-table :test 'equal)))
+      (skip "set MLX_CL_TEST_ALL_MODELS to test Qwen2.5, Qwen3, Llama 3.2, Gemma 2/3, Phi-3.5 and OLMoE")
+      ;; one model in memory at a time: together they exceed 16 GB machines
+      (let ((current-repo nil) (current nil))
         (dolist (case (fixture "families.sexp"))
-          (destructuring-bind (&key repo messages text prompt-ids eos ids) case
-            (let* ((model (or (gethash repo models) (setf (gethash repo models) (llm:load-model repo))))
+          (destructuring-bind (&key repo messages (thinking t) text prompt-ids eos ids) case
+            (let* ((model (if (equal repo current-repo)
+                              current
+                              (progn (when current (mx:free (nn:parameters current)))
+                                     (setf current-repo repo current (llm:load-model repo)))))
                    (tk (llm:model-tokenizer model))
                    ;; Llama 3 templates print today's date
                    (text (let ((p (search "Today Date: " text)))
@@ -361,7 +460,7 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
                                text)))
                    (want (remove-if (lambda (id) (member id eos)) ids))
                    (got '()))
-              (is (string= text (llm:apply-chat-template tk messages)) "~A chat template" repo)
+              (is (string= text (llm:apply-chat-template tk messages :thinking thinking)) "~A chat template" repo)
               (unless (search "Today Date" text)
                 (is (equal prompt-ids (llm:encode tk text)) "~A prompt tokens" repo))
               (llm:generate-tokens model prompt-ids (lambda (id) (push id got))

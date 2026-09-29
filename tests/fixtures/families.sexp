@@ -1,5 +1,6 @@
 ;;;; Reference data for model families, produced with mlx-lm (greedy,
-;;;; temperature 0) on an M3: chat renderings, prompt ids, generated ids.
+;;;; temperature 0) on an M3 with MLX 0.32.1: chat renderings, prompt ids,
+;;;; generated ids.  :THINKING NIL cases pass enable_thinking=False.
 (
  (:repo "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
   :messages (("user" . "Explain what a hash table is."))
@@ -129,4 +130,98 @@ What is the capital of Italy?<|end|>
   :prompt-ids (32006 673 297 5176 29889 32007 32010 1724 338 278 7483 310 12730 29973 32007 32001)
   :eos (32000)
   :ids (997 27073 316 301 29915 28314 707 9184 29889 315 29915 342 425 8441 1750 633 1377 454 3793 1759 868 751 381 979 29892 454 27678 316 425 5814 5084 316 425 21919 4698 7081 29892 634 6722 409 16391 454 478 271 2185 29892 454 13003 316 6896 5084 868 3300 412 29892 1750 707 454 14547 6337 1981 295 316 301 29915 30062 18548 274 6347 1387 364 4125 457 29889 9184 707 8648 11009 434 1671))
+ (:repo "mlx-community/Qwen3-0.6B-4bit"
+  :messages (("user" . "Explain what a hash table is."))
+  :thinking nil
+  :text "<|im_start|>user
+Explain what a hash table is.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"
+  :prompt-ids (151644 872 198 840 20772 1128 264 5175 1965 374 13 151645 198 151644 77091 198 151667 271 151668 271)
+  :eos (151645)
+  :ids (32 3070 8296 1965 334 374 264 821 5944 429 14043 6894 311 2750 1667 264 5175 729 13 576 1887 4522 374 311 990 264 5175 729 311 2415 264 1376 320 8206 374 264 897 304 264 10997 476 264 1140 8 311 264 897 320 8206 374 264 5175 1965 4343 568 1096 374 16626 1483 304 15473 311 3553 323 17179 821 29720 382 14374 71287 1447 16 13 3070 6370 6633 334 510 256 481))
+ (:repo "mlx-community/Qwen3-0.6B-4bit"
+  :messages (("user" . "What is 12 times 13?"))
+  :text "<|im_start|>user
+What is 12 times 13?<|im_end|>
+<|im_start|>assistant
+"
+  :prompt-ids (151644 872 198 3838 374 220 16 17 3039 220 16 18 30 151645 198 151644 77091 198)
+  :eos (151645)
+  :ids (151667 198 32313 11 773 358 1184 311 7071 700 1128 220 16 17 3039 220 16 18 374 13 6771 752 1191 553 88646 46444 13 358 1414 429 84192 1378 5109 374 1075 7842 1105 3786 438 1657 3039 438 862 1985 13 2055 220 16 17 54916 553 220 16 18 1112 6771 752 1744 911 279 5297 12111 1588 382 5338 11 7196 358 646 1438 1495 220 16 17 323 220 16 18 1119 9155))
+ (:repo "mlx-community/Qwen3-0.6B-4bit"
+  :messages (("system" . "Answer in one short sentence.") ("user" . "Why is the sky blue?"))
+  :thinking nil
+  :text "<|im_start|>system
+Answer in one short sentence.<|im_end|>
+<|im_start|>user
+Why is the sky blue?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"
+  :prompt-ids (151644 8948 198 16141 304 825 2805 11652 13 151645 198 151644 872 198 10234 374 279 12884 6303 30 151645 198 151644 77091 198 151667 271 151668 271)
+  :eos (151645)
+  :ids (785 12884 7952 6303 1576 315 279 1616 3100 83161 448 279 16566 11 1380 23327 92859 315 3100 320 4803 6303 8 525 36967 304 678 17961 11 3259 279 12884 4994 6303 13 151645))
+ (:repo "mlx-community/Qwen3-0.6B-4bit"
+  :messages (("user" . "Hi!") ("assistant" . "<think>
+The user greets me.
+</think>
+
+Hello! How can I help?") ("user" . "Name a prime number."))
+  :thinking nil
+  :text "<|im_start|>user
+Hi!<|im_end|>
+<|im_start|>assistant
+Hello! How can I help?<|im_end|>
+<|im_start|>user
+Name a prime number.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"
+  :prompt-ids (151644 872 198 13048 0 151645 198 151644 77091 198 9707 0 2585 646 358 1492 30 151645 198 151644 872 198 675 264 10250 1372 13 151645 198 151644 77091 198 151667 271 151668 271)
+  :eos (151645)
+  :ids (9707 0 3555 374 279 10250 1372 498 2299 3330 369 30 151645))
+ (:repo "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit"
+  :messages (("user" . "Explain what a hash table is."))
+  :text "|||IP_ADDRESS|||<|user|>
+Explain what a hash table is.
+<|assistant|>
+"
+  :prompt-ids (50279 29 93 4537 49651 187 1672 19104 752 247 13283 2829 310 15 187 29 93 515 5567 49651 187)
+  :eos (50279)
+  :ids (34 13283 2829 13 671 1929 347 247 13283 3711 13 310 247 941 2605 326 17930 271 42162 3781 12002 941 1511 13 247 2605 326 476 3711 10149 281 2193 15 733 33526 436 10603 407 9433 247 13283 1159 281 253 10149 13 534 48169 271 7007 3605 715 271 3781 273 47289 390 25195 13 432 534 253 6799 1318 476 320 22111 15 187 187 4943 434 849 13283 7180 3839 789 27 187 187))
+ (:repo "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit"
+  :messages (("system" . "Answer in one short sentence.") ("user" . "Why is the sky blue?"))
+  :text "|||IP_ADDRESS|||<|system|>
+Answer in one short sentence.
+<|user|>
+Why is the sky blue?
+<|assistant|>
+"
+  :prompt-ids (50279 29 93 10394 49651 187 32869 275 581 2159 6197 15 187 29 93 4537 49651 187 4967 310 253 8467 4797 32 187 29 93 515 5567 49651 187)
+  :eos (50279)
+  :ids (510 8467 4620 4797 984 273 10734 34460 11715 13 534 6634 672 23993 19413 253 7565 434 10825 285 310 17485 275 512 10746 407 253 21379 285 6353 1246 275 253 2329 15 10063 1708 310 17485 625 685 643 9830 984 352 24376 347 12217 13 4577 10212 15 50279))
+ (:repo "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit"
+  :messages (("user" . "Hi!") ("assistant" . "Hello! How can I help?") ("user" . "Name a prime number."))
+  :text "|||IP_ADDRESS|||<|user|>
+Hi!
+<|assistant|>
+Hello! How can I help?|||IP_ADDRESS|||
+<|user|>
+Name a prime number.
+<|assistant|>
+"
+  :prompt-ids (50279 29 93 4537 49651 187 12764 2 187 29 93 515 5567 49651 187 12092 2 1359 476 309 1361 32 50279 187 29 93 4537 49651 187 2402 247 4335 1180 15 187 29 93 515 5567 49651 187)
+  :eos (50279)
+  :ids (34 4335 1180 310 247 3626 1180 3687 685 337 326 556 642 2762 35076 641 643 685 337 285 3139 15 3856 434 247 973 14 4304 4335 1180 27 187 187 424 19 424 187 187 19 310 253 760 1014 4335 1180 984 512 643 1014 3904 476 320 4272 407 374 13 3021 597 403 417 4335 15 50279))
 )

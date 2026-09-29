@@ -125,6 +125,7 @@ losses and initializers.")
    #:dropout #:conv1d #:conv2d #:max-pool-1d #:max-pool-2d #:avg-pool-1d #:avg-pool-2d
    #:sequential #:identity #:prelu #:multi-head-attention #:create-additive-causal-mask
    #:rope #:quantized-linear #:quantized-embedding #:quantize
+   #:switch-linear #:quantized-switch-linear #:switch-glu #:swiglu
    ;; activations
    #:relu #:relu6 #:leaky-relu #:elu #:selu #:celu #:gelu #:gelu-approx #:gelu-fast-approx
    #:silu #:mish #:softplus #:softsign #:log-sigmoid #:hardswish #:hard-tanh

@@ -42,10 +42,17 @@ The marker may be written with a real newline or a \\n escape."
             (nth (1- month) '("Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"))
             year)))
 
-(defun apply-chat-template (tokenizer messages &key (add-generation-prompt t))
+(defun strip-thinking (content)
+  "The answer part of a reasoning model's reply: what follows </think>."
+  (let ((p (search "</think>" content :from-end t)))
+    (if p (string-left-trim '(#\Newline) (subseq content (+ p 8))) content)))
+
+(defun apply-chat-template (tokenizer messages &key (add-generation-prompt t) (thinking t))
   "Render MESSAGES -- a list of (role . content), roles \"system\", \"user\"
 or \"assistant\" -- as the model's chat prompt string.  ChatML (SmolLM,
-Qwen), Llama 3, Gemma and Phi-3 formats are recognised."
+Qwen), Llama 3, Gemma, Phi-3 and Tulu (OLMoE) formats are recognised.
+With THINKING false, reasoning models that support it (Qwen3) are told to
+answer directly."
   (let ((template (or (tokenizer-chat-template tokenizer) "")))
     (cond
       ((search "<|im_start|>" template)
@@ -53,9 +60,19 @@ Qwen), Llama 3, Gemma and Phi-3 formats are recognised."
          (let ((default (template-default-system template)))
            (when (and default (not (equal (car (first messages)) "system")))
              (format s "<|im_start|>system~%~A<|im_end|>~%" default)))
-         (loop for (role . content) in messages
-               do (format s "<|im_start|>~A~%~A<|im_end|>~%" role content))
-         (when add-generation-prompt (format s "<|im_start|>assistant~%"))))
+         (let ((reasoning (search "</think>" template))
+               (last-user (or (position "user" messages :key #'car :test #'equal :from-end t) -1)))
+           (loop for (role . content) in messages
+                 for i from 0
+                 do (format s "<|im_start|>~A~%~A<|im_end|>~%" role
+                            ;; Qwen3 drops the reasoning of earlier assistant turns
+                            (if (and reasoning (equal role "assistant") (< i last-user))
+                                (strip-thinking content)
+                                content))))
+         (when add-generation-prompt
+           (format s "<|im_start|>assistant~%")
+           (when (and (not thinking) (search "enable_thinking" template))
+             (format s "<think>~%~%</think>~%~%")))))
       ((search "<|start_header_id|>" template)
        (with-output-to-string (s)
          (write-string "<|begin_of_text|>" s)
@@ -91,6 +108,17 @@ Qwen), Llama 3, Gemma and Phi-3 formats are recognised."
          (loop for (role . content) in messages
                unless (and (equal role "system") (zerop (length content)))
                  do (format s "<|~A|>~%~A<|end|>~%" role content))
+         (when add-generation-prompt (format s "<|assistant|>~%"))))
+      ((search "<|user|>" template)
+       ;; Tulu (OLMoE): assistant turns end with the EOS token
+       (with-output-to-string (s)
+         (write-string (or (bos-string tokenizer) "") s)
+         (loop for ((role . text) . rest) on messages
+               do (format s "<|~A|>~%~A" role text)
+                  (if (equal role "assistant")
+                      ;; "...eos\n", except for a final assistant turn
+                      (format s "~A~:[~%~;~]" (or (eos-string tokenizer) "") (null rest))
+                      (terpri s)))
          (when add-generation-prompt (format s "<|assistant|>~%"))))
       (t (error "Unrecognised chat template; use a raw prompt.")))))
 
@@ -179,7 +207,7 @@ previous token, overlapping Lisp work with the GPU."
                  (eql 0 (search (bos-string tokenizer) text))))))
 
 (defun generate (model prompt &key (max-tokens 256) (temperature 0.0) (top-p 1.0) seed
-                                   (chat t) system stream (verbose nil))
+                                   (chat t) system stream (verbose nil) (thinking t))
   "Generate text from MODEL (from LOAD-MODEL) for PROMPT.  With CHAT (the
 default) PROMPT is a user message wrapped in the model's chat template
 (SYSTEM overrides the system prompt); otherwise it is raw text.  When
@@ -188,7 +216,8 @@ VERBOSE, timing is reported on *ERROR-OUTPUT*.  Returns the generated text."
   (let* ((tokenizer (or (model-tokenizer model) (error "MODEL has no tokenizer.")))
          (text (if chat
                    (apply-chat-template tokenizer (append (and system (list (cons "system" system)))
-                                                          (list (cons "user" prompt))))
+                                                          (list (cons "user" prompt)))
+                                        :thinking thinking)
                    prompt))
          (ids (encode tokenizer text :add-bos (add-bos-p tokenizer text)))
          (decoder (make-stream-decoder tokenizer))

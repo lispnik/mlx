@@ -11,8 +11,9 @@ On top of that it provides:
 
 - **`mlx.nn` and `mlx.optimizers`.** Ports of Python MLX's neural-network
   and optimizer libraries that match them numerically.
-- **`mlx/llm`.** Runs Hugging Face Llama, Qwen2, Mistral, Phi-3 and
-  Gemma 2/3 models, producing the same tokens as mlx-lm at the same
+- **`mlx/llm`.** Runs Hugging Face Llama, Qwen2/3, Mistral, Phi-3 and
+  Gemma 2/3 models, and the mixture-of-experts Mixtral, Qwen2-MoE,
+  Qwen3-MoE and OLMoE. It produces the same tokens as mlx-lm at the same
   speed.
 
 Runnable examples, MNIST and a character-level GPT trained from scratch,
@@ -40,10 +41,11 @@ are in [`examples/`](examples/).
 ocicl install          # cffi, trivial-garbage, fiveam, clingon (from ocicl.csv)
 make test              # FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU;
                        # MLX_CL_TEST_MODELS=1 adds tests against real model weights;
-                       # MLX_CL_TEST_ALL_MODELS=1 adds five more families (~5 GB);
+                       # MLX_CL_TEST_ALL_MODELS=1 adds seven more families (~9 GB);
                        # MLX_CL_TEST_EXACT=1 also demands full-length greedy
                        # agreement with mlx-lm, which only holds on the GPU
-                       # generation the fixtures came from, an M3)
+                       # generation and MLX version the fixtures came from:
+                       # an M3, MLX 0.32.1)
 make cli               # builds bin/mlx-cl
 ```
 
@@ -218,6 +220,11 @@ funcallable.
 `sequential`, `multi-head-attention`, `rope`, `prelu`, and the quantized
 `quantized-linear` / `quantized-embedding` (see `nn:quantize`).
 
+**Mixture-of-experts layers**, as in mlx-lm's `switch_layers`:
+`switch-linear` (a stack of expert weights applied per token via
+`gather_mm`), its quantized form (built by `nn:quantize`), and `switch-glu`.
+When there are many tokens, `switch-glu` sorts them by expert first.
+
 **Also:** 20 activations, 11 losses and the standard initializers. The rest
 of the module protocol is `parameters`, `trainable-parameters`, `update`,
 `freeze`, `train-mode`, `load-weights`, `save-weights` and `summary`.
@@ -249,12 +256,19 @@ optimizer or cache are exempt from `with-scope` (see `mx:persist`).
 downloaded on first use to `~/.cache/mlx-cl/models` (`$MLX_CL_CACHE`), and
 `$HF_TOKEN` is sent for gated models. Supported model types:
 
-- `llama`, `mistral` and `qwen2`, which cover SmolLM, TinyLlama, Llama
-  3.x and Qwen2.5;
+- `llama`, `mistral`, `qwen2` and `qwen3`, which cover SmolLM, TinyLlama,
+  Llama 3.x, Qwen2.5 and Qwen3 (`:thinking nil` / `--no-think` asks Qwen3
+  to answer without reasoning);
 - `phi3` (Phi-3 and 3.5, including LongRoPE);
 - `gemma2` (attention and logit soft-capping);
 - `gemma3_text` (sliding-window layers, q/k norms);
+- mixture of experts: `mixtral`, `qwen2_moe` (with a shared expert),
+  `qwen3_moe` and `olmoe`, each with its own routing rules. Raw Hugging
+  Face checkpoints with per-expert weights are stacked on load.
 - MLX 4- and 8-bit quantized checkpoints (e.g. from `mlx-community`).
+
+On the CPU, MLX supports unquantized mixture-of-experts only in float32;
+quantized MoE models work on both devices.
 
 One configurable decoder implements them all. Each family's departures
 from Llama follow mlx-lm operation for operation, down to details such as
@@ -274,11 +288,14 @@ match `apply_chat_template` for every model above. Generation also stops at
 the template's end-of-turn token, which some checkpoints omit from their
 EOS list.
 
-**Verified against mlx-lm** on an M3:
+**Verified against mlx-lm** on an M3, with both on the same MLX version:
 
 - Greedy generation gives identical tokens and text for SmolLM2-135M,
-  Qwen2.5-0.5B, Llama-3.2-1B, Gemma-2-2B, Gemma-3-1B and Phi-3.5-mini
-  (4-bit mlx-community checkpoints).
+  Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B, Gemma-2-2B, Gemma-3-1B,
+  Phi-3.5-mini and OLMoE-1B-7B (4-bit mlx-community checkpoints).
+- Mixtral, Qwen2-MoE and Qwen3-MoE are too large to run here. For them and
+  every other new type, tiny random models built by mlx-lm give
+  bit-identical logits (`tools/make-model-fixtures.py`, tested offline).
 - Decoding speed matches mlx-lm's within measurement noise when the two run
   back to back, e.g. about 250 tokens/s for SmolLM2-135M and 54 for
   Gemma-2-2B.
@@ -331,6 +348,7 @@ $ bin/mlx-cl train -s 200               # compiled value-and-grad linear regress
 $ bin/mlx-cl generate "Write a haiku about Lisp"            # SmolLM2-135M by default
 $ bin/mlx-cl generate -m mlx-community/Qwen2.5-0.5B-Instruct-4bit -t 0 -v "Explain monads"
 $ bin/mlx-cl chat -m mlx-community/gemma-3-1b-it-4bit
+$ bin/mlx-cl generate -m mlx-community/Qwen3-0.6B-4bit --no-think "Explain monads"
 $ bin/mlx-cl download mlx-community/Qwen2.5-0.5B-Instruct-4bit
 ```
 

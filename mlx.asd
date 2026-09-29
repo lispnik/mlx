@@ -69,6 +69,7 @@
   :components ((:static-file "fixtures/pretokenize.sexp")
                (:static-file "fixtures/smollm.sexp")
                (:static-file "fixtures/families.sexp")
+               (:module "fixtures/tiny" :components ((:static-file "MLX_VERSION")))
                (:file "llm"))
   :perform (test-op (o c) (symbol-call :mlx-llm-tests :run-tests)))
 

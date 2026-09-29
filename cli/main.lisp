@@ -277,7 +277,9 @@
         (clingon:make-option :string :long-name "system" :short-name #\s :key :system
                                      :description "system prompt")
         (clingon:make-option :flag :long-name "verbose" :short-name #\v :key :verbose
-                                   :description "report speed and memory")))
+                                   :description "report speed and memory")
+        (clingon:make-option :flag :long-name "no-think" :key :no-think
+                                   :description "ask reasoning models (Qwen3) to answer without thinking")))
 
 (defun number-option (cmd key)
   (let ((v (clingon:getopt cmd key)))
@@ -304,6 +306,7 @@
                       :seed (clingon:getopt cmd :seed)
                       :system (clingon:getopt cmd :system)
                       :chat (not (clingon:getopt cmd :raw))
+                      :thinking (not (clingon:getopt cmd :no-think))
                       :stream *standard-output*
                       :verbose (clingon:getopt cmd :verbose))
         (fresh-line)))))
@@ -340,7 +343,8 @@
                  (setf history (append history (list (cons "user" line))))
                  (let* ((tk (llm:model-tokenizer model))
                         (messages (append (and system (list (cons "system" system))) history))
-                        (reply (llm:generate model (llm:apply-chat-template tk messages)
+                        (reply (llm:generate model (llm:apply-chat-template
+                                                    tk messages :thinking (not (clingon:getopt cmd :no-think)))
                                              :chat nil
                                              :max-tokens (clingon:getopt cmd :max-tokens)
                                              :temperature temperature

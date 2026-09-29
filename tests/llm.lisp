@@ -65,9 +65,11 @@
 
 (defun byte-tokenizer ()
   "A tokenizer whose token i is the single byte i."
-  (let ((id->token (make-array 256)))
-    (dotimes (i 256) (setf (aref id->token i) (string (aref mlx.llm::*byte->char* i))))
-    (make-instance 'llm:tokenizer :vocab (make-hash-table :test 'equal) :id->token id->token
+  (let ((id->token (make-array 256)) (vocab (make-hash-table :test 'equal)))
+    (dotimes (i 256)
+      (setf (aref id->token i) (string (aref mlx.llm::*byte->char* i))
+            (gethash (aref id->token i) vocab) i))
+    (make-instance 'llm:tokenizer :vocab vocab :id->token id->token
                                   :ranks (make-hash-table :test 'equal) :special '()
                                   :special-ids (make-hash-table) :pre-tokenizers '())))
 
@@ -580,3 +582,62 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
     (dolist (code (list "(defun g (x) (* x 2))"
                         (format nil "(defun f (x)~%  (let ((a #\\()~%        (b \"a ( string~%with ) parens\"))~%    (list a b) ; comment )~%    #| block ( |#~%    (+ a x)))")))
       (is (string= code (funcall repair code)) "changed: ~S" code))))
+
+;;; ------------------------------------------------------------------
+;;; Editor completion
+
+(defpackage :mlx-llm-tests.shop (:use :cl))
+
+(in-package :mlx-llm-tests.shop)
+
+(defun item-total (item &key (tax 0.0))
+  "Price times quantity."
+  (list item tax))
+
+(in-package :mlx-llm-tests)
+
+(test completion-image-context
+  (let ((shop (find-package :mlx-llm-tests.shop)))
+    (is (equal '("defun" "f" "x" "item-total" "cl:car")
+               (mlx.llm::symbol-tokens "(defun f (x) \"a (string\" ; comment (x
+  (item-total #\\( x) #| block |# (cl:car x))")))
+    (is (eq 'mlx-llm-tests.shop::item-total (mlx.llm::resolve-token "item-total" shop)))
+    (is (eq 'car (mlx.llm::resolve-token "cl:car" shop)))
+    (is (null (mlx.llm::resolve-token "no-such-symbol-anywhere" shop)))
+    ;; lambda lists and docstrings come from the live image
+    (let ((context (mlx.llm::image-context "(item-total x)" shop)))
+      (is (search "(item-total item &key (tax 0.0)) -- Price times quantity." context) "~A" context))))
+
+(test completion-compiler-complaints
+  (let ((shop (find-package :mlx-llm-tests.shop)))
+    (let ((complaints (mlx.llm::compiler-complaints "(defun f (x) (frobnicate-widget x) (item-total x))" shop)))
+      (is (= 1 (length complaints)))
+      (is (search "frobnicate-widget" (first complaints))))
+    ;; reading did not leave new symbols behind
+    (is (null (find-symbol "FROBNICATE-WIDGET" shop)))
+    (is (null (mlx.llm::compiler-complaints "(defun g (x) (item-total x :tax 0.1))" shop)))))
+
+(test completion-structure
+  (is (equal "(f (g x))" (mlx.llm::completed-form "(f (g " "x)" ") (more stuff)")))
+  (is (null (mlx.llm::completed-form "(f (g " "x" "")))
+  (let ((lx (mlx.llm::form-lexer "(f (g ")))
+    ;; "))" would close the form: only the first paren is kept
+    (is (equal ")" (mlx.llm::text-before-close lx (sb-ext:string-to-octets "))"))))
+    (is (null (mlx.llm::text-before-close lx (sb-ext:string-to-octets "x)"))))))
+
+(test completion-keeps-the-form-well-formed
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256)))
+         (tk (byte-tokenizer)))
+    (setf (llm:model-tokenizer model) tk)
+    (dotimes (seed 6)
+      (random:seed seed)
+      (let ((prefix "(defun f (x)
+  (list "))
+        ;; nothing after point: the completion may close the form, no further
+        (let ((text (llm:complete-lisp model prefix :max-tokens 40)))
+          (is (lexes-p (concatenate 'string prefix text) :complete nil)
+              "seed ~D: ~S" seed text))
+        ;; "))" after point closes the form: the completion must not
+        (let* ((text (llm:complete-lisp model prefix :suffix "))" :max-tokens 40))
+               (lx (mlx.llm::form-lexer (concatenate 'string prefix text))))
+          (is (and lx (not (mlx.llm::lisp-form-complete-p lx))) "seed ~D: ~S" seed text))))))

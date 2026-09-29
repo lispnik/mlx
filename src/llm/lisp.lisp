@@ -110,14 +110,24 @@ readable form (LX is then in an undefined state)."
 (defparameter +structural-bytes+ '(40 41 34 124 59 92 35 46)
   "( ) \" | ; \\ # . -- bytes that can change the reader's structure.")
 
+(defun added-token-ids (tokenizer)
+  "Every added token's id -> T: special tokens, and markers such as
+<|fim_middle|> that a tokenizer may not flag as special.  None belongs in
+Lisp source."
+  (let ((ids (make-hash-table)))
+    (maphash (lambda (id v) (when v (setf (gethash id ids) t))) (slot-value tokenizer 'special-ids))
+    (dolist (a (slot-value tokenizer 'special) ids)
+      (setf (gethash (added-id a) ids) t))))
+
 (defun make-lisp-constraint (tokenizer)
   "Classify every token of TOKENIZER once."
   (let* ((n (vocab-size tokenizer))
+         (added (added-token-ids tokenizer))
          (octets (make-array n))
          (classes (make-array n))
          (structural '()))
     (dotimes (id n)
-      (let ((bytes (if (gethash id (slot-value tokenizer 'special-ids))
+      (let ((bytes (if (gethash id added)
                        nil
                        (ignore-errors (token-octets tokenizer id)))))
         (setf (aref octets id) bytes
@@ -129,9 +139,10 @@ readable form (LX is then in an undefined state)."
                     (t :plain)))))
     (%make-lisp-constraint :octets octets :classes classes :structural (nreverse structural))))
 
-(defun lisp-mask (constraint lexer vocab)
+(defun lisp-mask (constraint lexer vocab &key forbid-close)
   "An additive mask (0 or -inf) over VOCAB logits allowing exactly the
-tokens that keep LEXER's text a prefix of one readable form."
+tokens that keep LEXER's text a prefix of one readable form.  With
+FORBID-CLOSE, tokens that would complete the form are excluded too."
   (let* ((classes (lisp-constraint-classes constraint))
          (octets (lisp-constraint-octets constraint))
          (outside (member (lisp-lexer-mode lexer) '(:start :done)))
@@ -147,8 +158,11 @@ tokens that keep LEXER's text a prefix of one readable form."
                   (when (or (not after-hash) (lex-octets (copy-lisp-lexer lexer) (svref octets id)))
                     (setf (aref mask id) 0f0))))))
     (dolist (id (lisp-constraint-structural constraint))
-      (when (and (< id vocab) (lex-octets (copy-lisp-lexer lexer) (svref octets id)))
-        (setf (aref mask id) 0f0)))
+      (when (< id vocab)
+        (let ((copy (copy-lisp-lexer lexer)))
+          (when (and (lex-octets copy (svref octets id))
+                     (not (and forbid-close (lisp-form-complete-p copy))))
+            (setf (aref mask id) 0f0)))))
     (mx:from-lisp mask)))
 
 ;;; ------------------------------------------------------------------
@@ -186,7 +200,7 @@ closing): COMPLETE-P is false if MAX-TOKENS ran out first; CLOSING is the
 text added to close the form, or NIL."
   (let* ((tokenizer (model-tokenizer model))
          (constraint (tokenizer-constraint tokenizer))
-         (special (slot-value tokenizer 'special-ids))
+         (special (added-token-ids tokenizer))
          (lexer (make-lisp-lexer))
          (cache (make-cache model))
          (vocab nil)

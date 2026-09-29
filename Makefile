@@ -3,7 +3,7 @@
 SBCL ?= sbcl
 LISP = $(SBCL) --noinform --non-interactive
 
-.PHONY: all deps generate check-generated test cli clean
+.PHONY: all deps generate check-generated test test-emacs cli clean
 
 all: cli
 
@@ -24,6 +24,9 @@ test:            ## run the FiveAM suites (MLX_CL_TEST_DEVICE=cpu forces the CPU
 	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-llm-tests :run-tests) 0 1))'
 	$(LISP) --eval '(asdf:load-system "mlx/symreg-tests")' \
 	        --eval '(uiop:quit (if (uiop:symbol-call :mlx-symreg-tests :run-tests) 0 1))'
+
+test-emacs:      ## run the ERT tests of emacs/mlx-complete.el (needs emacs)
+	emacs --batch -L emacs -l mlx-complete-tests -f ert-run-tests-batch-and-exit
 
 cli: bin/mlx-cl  ## build the command-line driver
 

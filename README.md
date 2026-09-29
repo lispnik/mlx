@@ -66,6 +66,7 @@ If libmlxc isn't in a standard location, set `MLX_C_LIBRARY=/path/to/libmlxc.dyl
 | `examples/` | MNIST and a character-level GPT, runnable from the project root |
 | `tests/` | FiveAM suites (`mlx/tests`, `mlx/llm-tests`, `mlx/symreg-tests`) and reference fixtures |
 | `cli/main.lisp` | clingon command-line driver |
+| `emacs/` | `mlx-complete.el`: model completion in SLY/SLIME, with ERT tests (`make test-emacs`) |
 
 To regenerate after upgrading mlx-c, run `make generate`, or
 `sbcl --script tools/generate.lisp /path/to/include/mlx/c`.
@@ -422,6 +423,43 @@ typical exercises in one or two attempts, such as:
 Harder exercises can exhaust the attempts on logic errors. The 3B model is
 noticeably weaker at Lisp; its output matches mlx-lm's, so the model is the
 limit, not the implementation.
+
+### Completion in Emacs, from the live image
+
+`emacs/mlx-complete.el` completes Common Lisp at point in SLY or SLIME,
+with a fill-in-the-middle code model (Qwen2.5-Coder-1.5B, 1 GB) running
+inside the Lisp image you're connected to. That placement lets it use what
+the image knows:
+
+- **The live image in the prompt.** The lambda lists and docstrings of the
+  functions, macros and variables used near point come from the image, as
+  do the current package's other definitions. The model calls your
+  functions with their real arguments.
+- **Reader-constrained.** Decoding continues from the lexer state of the
+  top-level form being edited, so a completion never breaks its structure.
+  Closing parens already after point (an editor's auto-pairing) are left
+  to close the form.
+- **Checked by the compiler.** The finished form is compiled in the image,
+  without being evaluated, and any undefined functions or variables are
+  shown with the completion.
+
+```elisp
+(add-to-list 'load-path "/path/to/mlx/emacs")
+(require 'mlx-complete)
+(add-hook 'lisp-mode-hook #'mlx-complete-mode)
+```
+
+`C-c TAB` shows a completion as grey text: `TAB` accepts it, and any other
+key dismisses it. `C-u C-c TAB` completes only to the end of the line. The
+first request loads `mlx/llm` and the model (`mlx-complete-model`); after
+that a completion takes 0.3–0.5 s on an M3. From Lisp, the same completion
+is available as `mlx.llm:complete-lisp`.
+
+```lisp
+(defun cart-total (items)
+  "The total of ITEMS."
+  █)          ; => (reduce #'+ items :key #'item-total)   -- ITEM-TOTAL lives in the image
+```
 
 ## Symbolic regression
 

@@ -55,7 +55,7 @@
 
 (defsystem "mlx/llm"
   :description "Language models on MLX: Hugging Face tokenizers, Llama-family models, generation."
-  :depends-on ("mlx" "com.inuoe.jzon")
+  :depends-on ("mlx" "com.inuoe.jzon" "sb-introspect")
   :pathname "src/llm/"
   :serial t
   :components ((:file "package")
@@ -63,7 +63,8 @@
                (:file "models")
                (:file "hub")
                (:file "generate")
-               (:file "lisp")))
+               (:file "lisp")
+               (:file "complete")))
 
 (defsystem "mlx/symreg"
   :description "Symbolic regression: genetic programming over Lisp expressions, evaluated and tuned on the GPU."

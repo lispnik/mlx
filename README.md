@@ -12,7 +12,7 @@ On top of that it provides:
 - **`mlx.nn` and `mlx.optimizers`.** Ports of Python MLX's neural-network
   and optimizer libraries that match them numerically.
 - **`mlx/llm`.** Runs Hugging Face Llama, Qwen2, Mistral, Phi-3 and
-  Gemma 2/3 models, producing the same tokens as mlx-lm at about the same
+  Gemma 2/3 models, producing the same tokens as mlx-lm at the same
   speed.
 
 Runnable examples, MNIST and a character-level GPT trained from scratch,
@@ -279,8 +279,9 @@ EOS list.
 - Greedy generation gives identical tokens and text for SmolLM2-135M,
   Qwen2.5-0.5B, Llama-3.2-1B, Gemma-2-2B, Gemma-3-1B and Phi-3.5-mini
   (4-bit mlx-community checkpoints).
-- Decoding speed is 89–100% of mlx-lm's, e.g. about 250 tokens/s for
-  SmolLM2-135M and 120 for Gemma-3-1B.
+- Decoding speed matches mlx-lm's within measurement noise when the two run
+  back to back, e.g. about 250 tokens/s for SmolLM2-135M and 54 for
+  Gemma-2-2B.
 
 To get there, the generation loop:
 

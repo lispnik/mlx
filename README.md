@@ -244,6 +244,64 @@ them faster and their bf16 results identical to Python's.
 so memory stays flat across training steps. Arrays stored in a module,
 optimizer or cache are exempt from `with-scope` (see `mx:persist`).
 
+### `defnet`: shapes checked at compile time
+
+`nn:defnet` describes a network as a dataflow of stages. Its macro infers
+every intermediate shape while it expands:
+
+```lisp
+(nn:defnet cnn ((x (batch 28 28 1)) &key (classes 10))
+  (-> x
+      (conv2d 16 3 :padding 1) relu (max-pool-2d 2)    ; (batch 14 14 16)
+      (conv2d 32 3 :padding 1) relu (max-pool-2d 2)    ; (batch 7 7 32)
+      flatten                                          ; (batch 1568)
+      (linear 128) relu (dropout 0.25)                 ; linear gets its 1568 inputs itself
+      (linear classes)))
+
+(funcall (cnn :classes 3) images)    ; the constructor takes the hyperparameters
+(nn:net-summary 'cnn)                ; each stage's shape and parameter count
+```
+
+- **Checks at compile time.** Layers take their input sizes from the
+  inferred shapes. A mismatch signals `nn:shape-error` when the file
+  compiles, naming the form:
+
+  ```
+  defnet lm: a residual branch must keep the shape (b s 64), but it gives (b s 32)
+    in (residual (layer-norm) (linear 32))
+  defnet bad: attention: 7 heads do not divide the width 60
+  defnet bad: cannot broadcast (b 6) with (b 5): 6 vs 5
+  ```
+
+- **Three kinds of dimension.** A dimension can be:
+  - an integer;
+  - a hyperparameter (an `&key` parameter, known when the network is made);
+  - a runtime dimension (any other symbol, such as `batch`), bound from the
+    inputs on each call and checked for consistency across them.
+- **Composition.** A one-input network can be a stage of another. Its
+  hyperparameters are inferred from the shape it is applied to:
+
+  ```lisp
+  (nn:defnet decoder-block ((x (b s dims)) &key dims (heads 4) (hidden 256))
+    (-> x
+        (residual (layer-norm) (attention heads :mask :causal))
+        (residual (layer-norm) (linear hidden) gelu (linear dims))))
+
+  (nn:defnet lm ((tokens (b s)) &key (vocab 1000) (dims 64))
+    (-> tokens (embedding vocab dims) (repeat 2 (decoder-block)) (rms-norm) (linear vocab)))
+  ```
+
+**Stages:**
+- `linear`, `conv1d`, `conv2d`, max/avg pooling, `embedding`, `layer-norm`,
+  `rms-norm`, `dropout` and `attention`;
+- `flatten`, `reshape`, `transpose`, and `mean`/`sum`/`max` over an axis;
+- the activations;
+- `residual`, `repeat` and `elementwise`.
+
+**Expressions:** `->`, `let*`, the elementwise operators `+ - * /
+maximum minimum` (with broadcasting), `matmul` and `concat`. The MNIST
+example's CNN is written this way.
+
 ## Language models
 
 ```lisp

@@ -33,6 +33,7 @@
                (:file "nn/module")
                (:file "nn/functions")
                (:file "nn/layers")
+               (:file "nn/defnet")
                (:file "nn/optimizers"))
   :in-order-to ((test-op (test-op "mlx/tests"))))
 
@@ -48,7 +49,8 @@
                (:file "transforms")
                (:file "io")
                (:file "system")
-               (:file "nn"))
+               (:file "nn")
+               (:file "defnet"))
   :perform (test-op (o c) (symbol-call :mlx-tests :run-tests)))
 
 (defsystem "mlx/llm"

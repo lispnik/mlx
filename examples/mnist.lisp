@@ -69,13 +69,18 @@
                  (nn:linear 256 256) #'nn:relu
                  (nn:linear 256 10)))
 
-(defun make-cnn ()
-  (nn:sequential (nn:conv2d 1 16 3 :padding 1) #'nn:relu (nn:max-pool-2d 2)   ; 14x14
-                 (nn:conv2d 16 32 3 :padding 1) #'nn:relu (nn:max-pool-2d 2)  ; 7x7
-                 (lambda (x) (mx:reshape x (list (mx:dim x 0) -1)))
-                 (nn:linear (* 7 7 32) 128) #'nn:relu
-                 (nn:dropout 0.25)
-                 (nn:linear 128 10)))
+;;; The CNN with DEFNET: shapes are inferred and checked as it compiles,
+;;; so the first linear layer gets its 7 x 7 x 32 = 1568 inputs by itself.
+;;; (nn:net-summary 'cnn) prints each stage's shape and parameter count.
+(nn:defnet cnn ((x (batch 28 28 1)) &key (classes 10))
+  (-> x
+      (conv2d 16 3 :padding 1) relu (max-pool-2d 2)    ; (batch 14 14 16)
+      (conv2d 32 3 :padding 1) relu (max-pool-2d 2)    ; (batch 7 7 32)
+      flatten                                          ; (batch 1568)
+      (linear 128) relu (dropout 0.25)
+      (linear classes)))
+
+(defun make-cnn () (cnn))
 
 ;;; ------------------------------------------------------------------
 ;;; Training

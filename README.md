@@ -564,14 +564,20 @@ batch, and each gets its own front:
 
 ```
 $ bin/mlx-cl symreg --targets 2 -u m1=kg -u m2=kg -u r=m two-bodies.csv   # columns m1,m2,r,force,potential
-force:     (* 6.674 (/ (* m2 m1) (square r)))
-potential: (* -6.0672 (/ m1 (/ 0.90908 (/ m2 r))))                      # = -6.674 m1 m2 / r
+force:     (* 6.674 (/ (* m1 m2) (square r)))
+potential: (* -6.6742 (/ (* m1 m2) r))
 ```
 
 ```lisp
 (mlx.symreg:symbolic-regression rows ys :variables '(mass distance)
                                         :units '("kg" "m") :target-units "kg/m^2" :scaling nil)
 ```
+
+Results are simplified algebraically: constants are folded, products and
+quotients are merged into one coefficient times powers, and constants in
+sums are combined. Without that, the potential above comes out as
+`(* -6.0672 (/ m1 (/ 0.90908 (/ m2 r))))`. The simplified size is the one
+parsimony counts.
 
 The result is a Pareto front of size against loss. `expression-function`
 compiles any expression into a Lisp function, and `expression->mlx` builds

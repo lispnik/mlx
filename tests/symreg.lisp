@@ -176,3 +176,21 @@
       ;; each fits its own target
       (let ((f (sr:expression-function (sr:candidate-expression (second bests)) *vars*)))
         (is (close-p (* 3.0 (sin 1.0)) (funcall f 0.7 1.0) 1e-3))))))
+
+(test algebraic-simplification
+  (flet ((same-function-p (a b)
+           (let ((fa (sr:expression-function a *vars*)) (fb (sr:expression-function b *vars*)))
+             (loop for (x y) in (samples 30 :low 0.5 :high 3.0)
+                   always (close-p (funcall fa x y) (funcall fb x y) 1e-4)))))
+    (dolist (case '(((* -6.0672 (/ x0 (/ 0.90908 (/ x1 x0)))) 7)
+                    ((/ (* x0 (* 2.0 x1)) (* 4.0 x0)) 3)
+                    ((* (* x0 x0) (/ x1 x0)) 3)
+                    ((+ (+ x0 1.5) 2.0) 3)
+                    ((- (+ x0 3.0) (+ x1 3.0)) 3)
+                    ((square (* 2.0 x1)) 4)))
+      (destructuring-bind (e size) case
+        (let ((s (sr:simplify-expression e)))
+          (is (<= (sr:expression-size s) size) "~S -> ~S" e s)
+          (is (same-function-p e s) "~S -> ~S changes the function" e s))))
+    ;; nothing to gain: unchanged
+    (is (equal '(sin (+ x0 x1)) (sr:simplify-expression '(sin (+ x0 x1)))))))

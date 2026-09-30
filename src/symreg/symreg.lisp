@@ -102,15 +102,101 @@ floats, with the protected operators)."
                                :a-min (- +bound+) :a-max +bound+)))))
     (walk expression)))
 
-(defun simplify-expression (e)
+(defun fold-constants (e)
   "E with constant subexpressions folded."
   (if (atom e)
       e
-      (let ((args (mapcar #'simplify-expression (rest e))))
+      (let ((args (mapcar #'fold-constants (rest e))))
         (if (every #'numberp args)
             (sb-int:with-float-traps-masked (:overflow :invalid :divide-by-zero :inexact :underflow)
               (float (bound (apply (operator-lisp (find-operator (first e))) args)) 1f0))
             (cons (first e) args)))))
+
+;;; Products and quotients as monomials: a coefficient times factors with
+;;; integer powers, so (/ m1 (/ 0.909 (/ m2 r))) becomes (* 1.1 (/ (* m1 m2) r)).
+;;; (The rewrite ignores the protected division's special case at ~0.)
+
+(defun monomial (e)
+  "E as (values coefficient factors), FACTORS an alist (expression . power)."
+  (flet ((combine (c1 f1 c2 f2 sign)
+           (let ((factors (copy-alist f1)))
+             (loop for (x . p) in f2
+                   do (let ((cell (assoc x factors :test #'equal)))
+                        (if cell (incf (cdr cell) (* sign p)) (push (cons x (* sign p)) factors))))
+             (values (if (= sign 1) (* c1 c2) (/ c1 c2))
+                     (remove 0 factors :key #'cdr)))))
+    (cond ((numberp e) (values (rational e) '()))
+          ((and (consp e) (eq (first e) '*))
+           (multiple-value-bind (c1 f1) (monomial (second e))
+             (multiple-value-bind (c2 f2) (monomial (third e))
+               (combine c1 f1 c2 f2 1))))
+          ((and (consp e) (eq (first e) '/))
+           (multiple-value-bind (c2 f2) (monomial (third e))
+             (if (zerop c2)
+                 (values 1 (list (cons e 1)))     ; protected: leave it alone
+                 (multiple-value-bind (c1 f1) (monomial (second e))
+                   (combine c1 f1 c2 f2 -1)))))
+          ((and (consp e) (eq (first e) 'square))
+           (multiple-value-bind (c f) (monomial (second e))
+             (values (* c c) (mapcar (lambda (x) (cons (car x) (* 2 (cdr x)))) f))))
+          (t (values 1 (list (cons e 1)))))))
+
+(defun power-product (factors)
+  "The product of FACTORS ((expression . positive power)...) as a binary tree."
+  (let ((terms (loop for (x . p) in factors
+                     nconc (append (make-list (floor p 2) :initial-element (list 'square x))
+                                   (and (oddp p) (list x))))))
+    (and terms (reduce (lambda (a b) (list '* a b)) terms))))
+
+(defun monomial-expression (coefficient factors)
+  (let* ((factors (sort (copy-list factors) #'string< :key (lambda (f) (prin1-to-string (car f)))))
+         (up (power-product (remove-if-not #'plusp factors :key #'cdr)))
+         (down (power-product (mapcar (lambda (f) (cons (car f) (- (cdr f))))
+                                      (remove-if-not #'minusp factors :key #'cdr))))
+         (c (float coefficient 1f0)))
+    (cond ((and (null up) (null down)) c)
+          ((null down) (if (= c 1) up (list '* c up)))
+          ((null up) (list '/ c down))
+          (t (let ((ratio (list '/ up down)))
+               (if (= c 1) ratio (list '* c ratio)))))))
+
+(defun sum-terms (e)
+  "E as (values constant terms): TERMS a list of (sign . expression)."
+  (cond ((numberp e) (values (rational e) '()))
+        ((and (consp e) (member (first e) '(+ -)))
+         (multiple-value-bind (c1 t1) (sum-terms (second e))
+           (multiple-value-bind (c2 t2) (sum-terms (third e))
+             (if (eq (first e) '+)
+                 (values (+ c1 c2) (append t1 t2))
+                 (values (- c1 c2) (append t1 (mapcar (lambda (x) (cons (- (car x)) (cdr x))) t2)))))))
+        (t (values 0 (list (cons 1 e))))))
+
+(defun sum-expression (constant terms)
+  (let ((e (reduce (lambda (a term) (if (plusp (car term)) (list '+ a (cdr term)) (list '- a (cdr term))))
+                   (rest terms)
+                   :initial-value (if (plusp (car (first terms))) (cdr (first terms)) (list '* -1.0 (cdr (first terms)))))))
+    (cond ((zerop constant) e)
+          ((plusp constant) (list '+ e (float constant 1f0)))
+          (t (list '- e (float (- constant) 1f0))))))
+
+(defun simplify-expression (e)
+  "E with constants folded, products and quotients merged into one
+coefficient times powers, and constants in sums combined -- whichever
+form is smaller."
+  (if (atom e)
+      e
+      (let* ((e (fold-constants (cons (first e) (mapcar #'simplify-expression (rest e)))))
+             (candidates (list e)))
+        (when (consp e)
+          (case (first e)
+            ((* / square)
+             (multiple-value-bind (c factors) (monomial e)
+               (push (monomial-expression c factors) candidates)))
+            ((+ -)
+             (multiple-value-bind (c terms) (sum-terms e)
+               (when terms (push (sum-expression c terms) candidates))))))
+        ;; the original (last pushed first) wins ties
+        (reduce (lambda (a b) (if (< (expression-size b) (expression-size a)) b a)) (reverse candidates)))))
 
 (defun round-constants (e &optional (digits 5))
   (cond ((floatp e)

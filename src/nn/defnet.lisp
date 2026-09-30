@@ -25,9 +25,12 @@
 ;;;; Expressions:  input or LET* variable | number | (-> expr stage...)
 ;;;;   | (let* ((var expr)...) expr) | (+ - * / maximum minimum expr...)
 ;;;;   | (matmul a b) | (concat axis expr...)
-;;;; Stages:  (linear n) (conv1d out k) (conv2d out k) (max-pool-1d k)
-;;;;   (max-pool-2d k) (avg-pool-1d k) (avg-pool-2d k) (embedding vocab dims)
-;;;;   (layer-norm) (rms-norm) (dropout p) (attention heads [:mask :causal])
+;;;;   The body may return several values: (values expr...), also as the
+;;;;   body of a LET* (e.g. heads sharing a trunk).
+;;;; Stages:  (linear n) (conv1d out k) (conv2d out k) (conv-transpose1d out k)
+;;;;   (conv-transpose2d out k) (max-pool-1d k) (max-pool-2d k) (avg-pool-1d k)
+;;;;   (avg-pool-2d k) (embedding vocab dims) (layer-norm) (rms-norm)
+;;;;   (batch-norm) (group-norm groups) (dropout p) (attention heads [:mask :causal])
 ;;;;   flatten (reshape dim...) (transpose axis...) (mean axis) (sum axis)
 ;;;;   (max axis) (residual stage...) (repeat n stage...) (elementwise fn)
 ;;;;   relu gelu silu tanh sigmoid softmax ... (activations, with keywords)
@@ -208,6 +211,29 @@ the CODE computing the incoming value, and returns (values shape code)."
                      (list (first shape) (window-output (second shape) kh sh ph)
                            (window-output (third shape) kw sw pw) out))))))
 
+(defun transposed-output (size kernel stride padding output-padding)
+  "Output length of a transposed convolution over SIZE."
+  (dim-op '+ (dim-op '* (dim-op '+ size -1) stride) (+ (- (* 2 padding)) (1- kernel) output-padding 1)))
+
+(define-stage conv-transpose1d (args shape code)
+  (destructuring-bind (out k &key (stride 1) (padding 0) (output-padding 0)) args
+    (require-rank shape 3 "conv-transpose1d")
+    (let ((in (static-width shape "conv-transpose1d")))
+      (layer-stage 'conv-transpose1d shape code
+                   `(nn:conv-transpose1d ,in ,out ,k :stride ,stride :padding ,padding :output-padding ,output-padding)
+                   (list (first shape) (transposed-output (second shape) k stride padding output-padding) out)))))
+
+(define-stage conv-transpose2d (args shape code)
+  (destructuring-bind (out k &key (stride 1) (padding 0) (output-padding 0)) args
+    (require-rank shape 4 "conv-transpose2d")
+    (let ((in (static-width shape "conv-transpose2d")))
+      (destructuring-bind ((kh kw) (sh sw) (ph pw) (oh ow)) (mapcar #'pair-of (list k stride padding output-padding))
+        (layer-stage 'conv-transpose2d shape code
+                     `(nn:conv-transpose2d ,in ,out ',(list kh kw) :stride ',(list sh sw) :padding ',(list ph pw)
+                                           :output-padding ',(list oh ow))
+                     (list (first shape) (transposed-output (second shape) kh sh ph oh)
+                           (transposed-output (third shape) kw sw pw ow) out))))))
+
 (macrolet ((pool (name maker dims)
              `(define-stage ,name (args shape code)
                 (destructuring-bind (k &key stride (padding 0)) args
@@ -229,6 +255,16 @@ the CODE computing the incoming value, and returns (values shape code)."
 
 (define-stage layer-norm (args shape code)
   (layer-stage 'layer-norm shape code `(nn:layer-norm ,(static-width shape "layer-norm") ,@args) shape))
+
+(define-stage batch-norm (args shape code)
+  (layer-stage 'batch-norm shape code `(nn:batch-norm ,(static-width shape "batch-norm") ,@args) shape))
+
+(define-stage group-norm (args shape code)
+  (destructuring-bind (groups &rest options) args
+    (let ((width (static-width shape "group-norm")))
+      (when (and (integerp width) (integerp groups) (plusp (mod width groups)))
+        (shape-error "group-norm: ~D groups do not divide the width ~D" groups width))
+      (layer-stage 'group-norm shape code `(nn:group-norm ,groups ,width ,@options) shape))))
 
 (define-stage rms-norm (args shape code)
   (layer-stage 'rms-norm shape code `(nn:rms-norm ,(static-width shape "rms-norm") ,@args) shape))
@@ -345,9 +381,11 @@ the CODE computing the incoming value, and returns (values shape code)."
         (t dim)))
 
 (defun apply-net (name net args shape code)
-  (destructuring-bind (&key inputs output hyper &allow-other-keys) net
+  (destructuring-bind (&key inputs output outputs hyper &allow-other-keys) net
     (unless (= 1 (length inputs))
       (shape-error "~S takes ~D inputs; only one-input networks can be stages" name (length inputs)))
+    (when (> (length outputs) 1)
+      (shape-error "~S has ~D outputs; only one-output networks can be stages" name (length outputs)))
     (let* ((spec (second (first inputs)))
            (hyper-names (mapcar #'first hyper))
            (bindings (loop for (key value) on args by #'cddr
@@ -441,6 +479,28 @@ the CODE computing the incoming value, and returns (values shape code)."
           (t (shape-error "~S is not an expression; to apply a layer, write (-> ~S ~S)"
                           (first expr) (second expr) (cons (first expr) (cddr expr)))))))
 
+(defun infer-outputs (expr env)
+  "Like INFER for a network's body, which may return several values:
+(values e...), possibly as the body of LET*.  Returns (values shapes code)."
+  (let ((*form* expr))
+    (cond ((and (consp expr) (name= (first expr) "VALUES"))
+           (let ((results (loop for e in (rest expr) for i from 1
+                                collect (multiple-value-bind (shape code) (infer e env)
+                                          (note (format nil "output ~D" i) shape)
+                                          (list shape code)))))
+             (values (mapcar #'first results) `(values ,@(mapcar #'second results)))))
+          ((and (consp expr) (name= (first expr) "LET*"))
+           (let ((bindings '()))
+             (dolist (b (second expr))
+               (destructuring-bind (var value) b
+                 (multiple-value-bind (shape code) (infer value env)
+                   (push (list var code) bindings)
+                   (push (cons var shape) env))))
+             (multiple-value-bind (shapes code) (infer-outputs (third expr) env)
+               (values shapes `(let* ,(reverse bindings) ,code)))))
+          (t (multiple-value-bind (shape code) (infer expr env)
+               (values (list shape) code))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Runtime checks
 
@@ -496,8 +556,10 @@ at macroexpansion time; see src/nn/defnet.lisp for the language."
                    (every (lambda (d) (or (integerp d) (symbolp d))) (second s)))
         (error 'nn:shape-error :net name :form s :message "an input is (variable (dimension...))")))
     (dolist (s specs) (note (format nil "input ~(~A~)" (first s)) (second s)))
-    (multiple-value-bind (output code) (infer expr (mapcar (lambda (s) (cons (first s) (second s))) specs))
-      (let ((signature `(:inputs ,specs :output ,output :hyper ,hyper :trace ,(reverse *trace*))))
+    (multiple-value-bind (outputs code)
+        (infer-outputs expr (mapcar (lambda (s) (cons (first s) (second s))) specs))
+      (let ((signature `(:inputs ,specs :output ,(first outputs) :outputs ,outputs
+                         :hyper ,hyper :trace ,(reverse *trace*))))
         `(progn
            (eval-when (:compile-toplevel :load-toplevel :execute)
              (setf (gethash ',name *nets*) ',signature))

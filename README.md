@@ -293,8 +293,9 @@ every intermediate shape while it expands:
   ```
 
 **Stages:**
-- `linear`, `conv1d`, `conv2d`, max/avg pooling, `embedding`, `layer-norm`,
-  `rms-norm`, `dropout` and `attention`;
+- `linear`, `conv1d`, `conv2d`, `conv-transpose1d`, `conv-transpose2d`,
+  max/avg pooling, `embedding`, `layer-norm`, `rms-norm`, `batch-norm`,
+  `group-norm`, `dropout` and `attention`;
 - `flatten`, `reshape`, `transpose`, and `mean`/`sum`/`max` over an axis;
 - the activations;
 - `residual`, `repeat` and `elementwise`.
@@ -302,6 +303,15 @@ every intermediate shape while it expands:
 **Expressions:** `->`, `let*`, the elementwise operators `+ - * /
 maximum minimum` (with broadcasting), `matmul` and `concat`. The MNIST
 example's CNN is written this way.
+
+A network can return several values, for instance heads sharing a trunk:
+
+```lisp
+(nn:defnet classifier-with-confidence ((x (batch 20)) &key (classes 4))
+  (let* ((h (-> x (linear 32) relu)))
+    (values (-> h (linear classes))        ; (batch classes)
+            (-> h (linear 1) sigmoid))))   ; (batch 1)
+```
 
 ## Language models
 

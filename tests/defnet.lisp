@@ -97,3 +97,50 @@
         (optim:update opt model (nth-value 1 (funcall step)))
         (mx:eval (nn:parameters model))))
     (is (< (mx:item (funcall loss)) (* 0.5 initial)))))
+
+;;; Transposed convolutions, batch and group norm, several outputs
+
+(nn:defnet test-autoencoder ((x (batch 16 16 3)))
+  (-> x
+      (conv2d 8 3 :stride 2 :padding 1) (batch-norm) relu               ; (batch 8 8 8)
+      (conv2d 16 3 :stride 2 :padding 1) (group-norm 4) relu            ; (batch 4 4 16)
+      (conv-transpose2d 8 3 :stride 2 :padding 1 :output-padding 1) relu ; (batch 8 8 8)
+      (conv-transpose2d 3 3 :stride 2 :padding 1 :output-padding 1)))  ; (batch 16 16 3)
+
+(nn:defnet test-two-heads ((x (batch 20)) &key (classes 4))
+  (let* ((h (-> x (linear 32) relu)))
+    (values (-> h (linear classes))
+            (-> h (linear 1) sigmoid))))
+
+(nn:defnet test-signal ((x (batch len 2)))
+  (-> x (conv1d 4 3 :padding 1) relu (conv-transpose1d 2 4 :stride 2 :padding 1)))
+
+(test defnet-new-stages
+  (let ((ae (test-autoencoder)))
+    (is (equal '(2 16 16 3) (mx:shape (funcall ae (mx:zeros '(2 16 16 3))))))
+    (is (equal '(8 3 3 16) (mx:shape (nn:child (nn:child ae "conv_transpose2d_0") "weight")))))
+  ;; the summary's shapes are the inferred ones
+  (let ((text (with-output-to-string (s) (nn:net-summary 'test-autoencoder s))))
+    (is (search "(batch 4 4 16)" text))
+    (is (search "(batch 8 8 8)" text)))
+  (multiple-value-bind (logits p) (funcall (test-two-heads :classes 3) (mx:zeros '(5 20)))
+    (is (equal '(5 3) (mx:shape logits)))
+    (is (equal '(5 1) (mx:shape p))))
+  ;; a symbolic length: (len - 1) * 2 - 2 + 3 + 1 = 2 len
+  (is (equal '(2 14 2) (mx:shape (funcall (test-signal) (mx:zeros '(2 7 2)))))))
+
+(test defnet-new-stage-errors
+  (flet ((rejects (message text)
+           (is (and text (search message text)) "expected ~S in ~S" message text)))
+    (rejects "3 groups do not divide the width 16"
+             (shape-error-message (nn:defnet bad ((x (b 4 4 16))) (-> x (group-norm 3)))))
+    (rejects "only one-output networks can be stages"
+             (shape-error-message (nn:defnet bad ((x (batch 20))) (-> x (test-two-heads)))))))
+
+(nn:defnet test-upsample ((x (1 3 4 2)))
+  (-> x (conv-transpose2d 5 3 :stride 3 :padding 1 :output-padding 2)))
+
+(test defnet-transposed-conv-matches-mlx
+  ;; the inferred output size is what mx:conv-transpose2d produces
+  (is (equal '(1 9 12 5) (getf (gethash 'test-upsample mlx.nn.impl::*nets*) :output)))
+  (is (equal '(1 9 12 5) (mx:shape (funcall (test-upsample) (mx:zeros '(1 3 4 2)))))))

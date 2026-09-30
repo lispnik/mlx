@@ -14,4 +14,5 @@
            #:expression->mlx
            #:evaluate-expressions
            #:simplify-expression
+           #:parse-unit #:unit-string #:expression-units
            #:expression-size))

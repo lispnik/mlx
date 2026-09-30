@@ -491,9 +491,10 @@
                          ys))))
     (values rows ys (or variables (list (intern "X0" :mlx.symreg))))))
 
-(defun csv-data (path)
-  "Numeric columns of the CSV file at PATH, the last being the target:
-(values rows targets variables).  A header row names the variables."
+(defun csv-data (path targets)
+  "Numeric columns of the CSV file at PATH, the last TARGETS being targets:
+(values rows targets variables target-names).  A header row names the
+columns; targets are one number per row, or a list with several."
   (let* ((lines (remove-if (lambda (l) (zerop (length (string-trim " " l))))
                            (uiop:read-file-lines path)))
          (split (lambda (l) (mapcar (lambda (f) (string-trim " \"" f))
@@ -506,40 +507,68 @@
                                          (unless (realp n) (error "Not a number in ~A: ~S" path f))
                                          n))
                                      (funcall split l))))
-         (nvars (1- (length first-row))))
-    (values (mapcar #'butlast rows)
-            (mapcar (lambda (r) (car (last r))) rows)
-            (if header
-                (loop for name in (butlast first-row)
-                      collect (intern (string-upcase (substitute #\- #\Space name)) :mlx.symreg))
-                (loop for i below nvars collect (intern (format nil "X~D" i) :mlx.symreg))))))
+         (nvars (- (length first-row) targets))
+         (names (if header
+                    (loop for name in first-row
+                          collect (intern (string-upcase (substitute #\- #\Space name)) :mlx.symreg))
+                    (append (loop for i below nvars collect (intern (format nil "X~D" i) :mlx.symreg))
+                            (loop for i below targets collect (intern (format nil "Y~D" i) :mlx.symreg))))))
+    (unless (plusp nvars) (error "~A has ~D columns, too few for ~D targets." path (length first-row) targets))
+    (values (mapcar (lambda (r) (subseq r 0 nvars)) rows)
+            (mapcar (lambda (r) (if (= targets 1) (nth nvars r) (subseq r nvars))) rows)
+            (subseq names 0 nvars)
+            (subseq names nvars))))
+
+(defun unit-options (cmd variables target-names)
+  "The --unit NAME=UNIT options as (values variable-units target-units)."
+  (let ((given (loop for option in (clingon:getopt cmd :units)
+                     for eq = (or (position #\= option) (error "--unit takes NAME=UNIT, not ~S" option))
+                     collect (cons (string-upcase (subseq option 0 eq)) (subseq option (1+ eq))))))
+    (flet ((unit-of (name) (cdr (assoc (symbol-name name) given :test #'string=))))
+      (dolist (g given)
+        (unless (find (car g) (append variables target-names) :key #'symbol-name :test #'string=)
+          (error "--unit names ~(~A~), which is not a column" (car g))))
+      (values (and given (mapcar #'unit-of variables))
+              (and given (let ((units (mapcar #'unit-of target-names)))
+                           (if (rest units) units (first units))))))))
 
 (defun symreg-handler (cmd)
   (let ((formula (clingon:getopt cmd :formula))
         (csv (first (clingon:command-arguments cmd))))
     (unless (or formula csv) (clingon:print-usage-and-exit cmd *error-output*))
     (with-mlx-errors
-      (multiple-value-bind (rows ys variables) (if csv (csv-data csv) (formula-data cmd))
+      (multiple-value-bind (rows ys variables target-names)
+          (if csv
+              (csv-data csv (clingon:getopt cmd :targets))
+              (multiple-value-bind (rows ys variables) (formula-data cmd)
+                (values rows ys variables (list (intern "Y" :mlx.symreg)))))
         (format *error-output* "~&~:D samples of ~{~(~A~)~^, ~}~%" (length rows) variables)
-        (multiple-value-bind (best front)
-            (sr:symbolic-regression rows ys
-                                    :variables variables
-                                    :operators (mapcar #'read-formula
-                                                       (uiop:split-string (clingon:getopt cmd :operators)
-                                                                          :separator ", "))
-                                    :population (clingon:getopt cmd :population)
-                                    :generations (clingon:getopt cmd :generations)
-                                    :time-limit (clingon:getopt cmd :time-limit)
-                                    :max-size (clingon:getopt cmd :max-size)
-                                    :scaling (not (clingon:getopt cmd :no-scaling))
-                                    :seed (clingon:getopt cmd :seed)
-                                    :stream (and (not (clingon:getopt cmd :quiet)) *error-output*))
-          (let ((*print-case* :downcase) (*print-pretty* nil) (*package* (find-package :mlx.symreg)))
-            (format t "~&~%size  loss (MSE / variance)  expression~%")
-            (dolist (c front)
-              (format t "~4D  ~21,3,,,,,'EG  ~S~%" (sr:candidate-size c) (sr:candidate-loss c)
-                      (mlx.symreg::round-constants (sr:candidate-expression c))))
-            (format t "~%best: (lambda ~S ~S)~%" variables (sr:candidate-expression best))))))))
+        (multiple-value-bind (units target-units) (unit-options cmd variables target-names)
+          (multiple-value-bind (best front)
+              (sr:symbolic-regression rows ys
+                                      :variables variables
+                                      :units units :target-units target-units
+                                      :operators (mapcar #'read-formula
+                                                         (uiop:split-string (clingon:getopt cmd :operators)
+                                                                            :separator ", "))
+                                      :population (clingon:getopt cmd :population)
+                                      :generations (clingon:getopt cmd :generations)
+                                      :time-limit (clingon:getopt cmd :time-limit)
+                                      :max-size (clingon:getopt cmd :max-size)
+                                      :scaling (not (clingon:getopt cmd :no-scaling))
+                                      :seed (clingon:getopt cmd :seed)
+                                      :stream (and (not (clingon:getopt cmd :quiet)) *error-output*))
+            (let ((*print-case* :downcase) (*print-pretty* nil) (*package* (find-package :mlx.symreg))
+                  (several (rest target-names)))
+              (loop for name in target-names
+                    for best in (if several best (list best))
+                    for front in (if several front (list front))
+                    do (format t "~&~%~@[~(~A~):~%~]size  loss (MSE / variance)  expression~%"
+                               (and several name))
+                       (dolist (c front)
+                         (format t "~4D  ~21,3,,,,,'EG  ~S~%" (sr:candidate-size c) (sr:candidate-loss c)
+                                 (mlx.symreg::round-constants (sr:candidate-expression c))))
+                       (format t "~%best: (lambda ~S ~S)~%" variables (sr:candidate-expression best))))))))))
 
 (defun symreg-command ()
   (clingon:make-command
@@ -571,13 +600,20 @@
                                                 :description "largest expression, in nodes" :initial-value 30)
                   (clingon:make-option :flag :long-name "no-scaling" :key :no-scaling
                                              :description "judge f itself, not the best a + b f")
+                  (clingon:make-option :integer :long-name "targets" :key :targets
+                                                :description "how many of the CSV's last columns are targets, fitted at once"
+                                                :initial-value 1)
+                  (clingon:make-option :list :long-name "unit" :short-name #\u :key :units
+                                             :description "NAME=UNIT, e.g. mass=kg or force=kg*m/s^2 (repeatable): breed only dimensionally consistent formulas")
                   (clingon:make-option :integer :long-name "seed" :key :seed :description "random seed")
                   (clingon:make-option :flag :long-name "quiet" :short-name #\q :key :quiet
                                              :description "don't report each generation"))
    :examples '(("Rediscover a formula from 300 samples of it:" .
                 "mlx-cl symreg -f '(+ (square x0) (* 2.5 (sin x1)))'")
                ("Fit data (the last column is the target):" .
-                "mlx-cl symreg -t 60 data.csv"))
+                "mlx-cl symreg -t 60 data.csv")
+               ("With units, so only consistent formulas are bred:" .
+                "mlx-cl symreg -u mass=kg -u distance=m -u force=kg*m/s^2 gravity.csv"))
    :handler #'symreg-handler))
 
 ;;; ------------------------------------------------------------------

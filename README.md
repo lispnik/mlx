@@ -513,6 +513,25 @@ The whole population is evaluated as one computation:
   and constant mutations, tournament selection and elitism all work on
   plain s-expressions.
 
+**Units.** Give variables physical units and only dimensionally
+consistent formulas are bred: no metres plus kilograms, no sine of a mass.
+As in PySR, constants may carry any unit. Without linear scaling
+(`:scaling nil`), the formula must also have the target's unit.
+
+**Several targets** are fitted at once. Their populations share one GPU
+batch, and each gets its own front:
+
+```
+$ bin/mlx-cl symreg --targets 2 -u m1=kg -u m2=kg -u r=m two-bodies.csv   # columns m1,m2,r,force,potential
+force:     (* 6.674 (/ (* m2 m1) (square r)))
+potential: (* -6.0672 (/ m1 (/ 0.90908 (/ m2 r))))                      # = -6.674 m1 m2 / r
+```
+
+```lisp
+(mlx.symreg:symbolic-regression rows ys :variables '(mass distance)
+                                        :units '("kg" "m") :target-units "kg/m^2" :scaling nil)
+```
+
 The result is a Pareto front of size against loss. `expression-function`
 compiles any expression into a Lisp function, and `expression->mlx` builds
 it as an MLX graph.

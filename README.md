@@ -459,7 +459,7 @@ Qwen2.5-Coder-7B (4-bit) on an M3:
 | + repair loop (4 attempts) | 24/40 | 3448 s |
 
 For this model, the reader constraint and paren repair change nothing:
-it rarely writes malformed Lisp. They mattered for the 3B model, whose
+it rarely writes malformed Lisp. In earlier, informal runs they did rescue the 3B model, whose
 paren counting fails often. The gain comes from running the code and
 feeding the failures back. Best-of-4 candidates (`:candidates 4`) has
 not finished a full run yet; the run was interrupted by memory pressure.

@@ -306,7 +306,20 @@
     (with-mlx-errors
       (let* ((temperature (number-option cmd :temp))
              (top-p (number-option cmd :top-p))
-             (model (load-model-reporting cmd)))
+             (model (load-model-reporting cmd))
+             (samples (clingon:getopt cmd :samples)))
+        (if (> samples 1)
+            ;; one batch: every sample is generated at once
+            (loop for text in (llm:generate-batch model (make-list samples :initial-element prompt)
+                                                  :max-tokens (clingon:getopt cmd :max-tokens)
+                                                  :temperature temperature :top-p top-p
+                                                  :seed (clingon:getopt cmd :seed)
+                                                  :system (clingon:getopt cmd :system)
+                                                  :chat (not (clingon:getopt cmd :raw))
+                                                  :thinking (not (clingon:getopt cmd :no-think))
+                                                  :verbose (clingon:getopt cmd :verbose))
+                  for i from 1
+                  do (format t "~&--- sample ~D~%~A~%" i text))
         (llm:generate model prompt
                       :max-tokens (clingon:getopt cmd :max-tokens)
                       :temperature temperature
@@ -316,7 +329,7 @@
                       :chat (not (clingon:getopt cmd :raw))
                       :thinking (not (clingon:getopt cmd :no-think))
                       :stream *standard-output*
-                      :verbose (clingon:getopt cmd :verbose))
+                      :verbose (clingon:getopt cmd :verbose)))
         (fresh-line)))))
 
 (defun generate-command ()
@@ -326,9 +339,13 @@
    :usage "[options] PROMPT..."
    :options (append (model-options)
                     (list (clingon:make-option :flag :long-name "raw" :key :raw
-                                                     :description "use the prompt as is, without the chat template")))
+                                                     :description "use the prompt as is, without the chat template")
+                          (clingon:make-option :integer :long-name "samples" :short-name #\N :key :samples
+                                                        :description "generate this many replies at once, in one batch"
+                                                        :initial-value 1)))
    :examples '(("Ask a question:" . "mlx-cl generate 'What is the capital of France?'")
-               ("Another model, greedy:" . "mlx-cl generate -m mlx-community/gemma-3-1b-it-4bit -t 0 'Write a haiku'"))
+               ("Another model, greedy:" . "mlx-cl generate -m mlx-community/gemma-3-1b-it-4bit -t 0 'Write a haiku'")
+               ("Four samples, generated together:" . "mlx-cl generate -N 4 -t 0.9 'Name a Lisp dialect'"))
    :handler #'generate-handler))
 
 (defun chat-handler (cmd)
@@ -399,6 +416,7 @@
             (llm:write-lisp model task
                             :tests (clingon:getopt cmd :tests)
                             :attempts (clingon:getopt cmd :attempts)
+                            :candidates (clingon:getopt cmd :candidates)
                             :timeout (clingon:getopt cmd :timeout)
                             :isolation (if (clingon:getopt cmd :in-process) :in-process :process)
                             :stream (and (clingon:getopt cmd :verbose) *standard-output*))
@@ -419,6 +437,9 @@
                                              :description "a form that must return true (repeatable)")
                   (clingon:make-option :integer :long-name "attempts" :short-name #\a :key :attempts
                                                 :description "tries before giving up" :initial-value 4)
+                  (clingon:make-option :integer :long-name "candidates" :short-name #\n :key :candidates
+                                                :description "forms generated at once per attempt (one batch); the first that passes wins"
+                                                :initial-value 1)
                   (clingon:make-option :integer :long-name "timeout" :key :timeout
                                                 :description "seconds allowed per evaluation" :initial-value 10)
                   (clingon:make-option :flag :long-name "in-process" :key :in-process

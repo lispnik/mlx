@@ -117,12 +117,16 @@ experts are chosen, as each family does in mlx-lm:
 
 (defconstant +cache-chunk+ 256)
 
-(defstruct (kv-cache (:constructor make-kv-cache ()))
-  (keys nil) (values nil) (offset 0))
+(defstruct (kv-cache (:constructor make-kv-cache (&optional padding)))
+  (keys nil) (values nil) (offset 0)
+  (padding nil))  ; for a batch: an int32 array (B 1 1 1) of each row's left padding
 
-(defun make-cache (model)
-  "A fresh KV cache (one entry per layer) for MODEL."
-  (loop repeat (length (nn:child (nn:child model :model) :layers)) collect (make-kv-cache)))
+(defun make-cache (model &key padding)
+  "A fresh KV cache (one entry per layer) for MODEL.  For a batch of
+left-padded prompts, PADDING lists each row's number of padding tokens."
+  (let ((padding (and padding (some #'plusp padding)
+                      (mx:persist (mx:reshape (mx:from-lisp padding :dtype :int32) (list -1 1 1 1))))))
+    (loop repeat (length (nn:child (nn:child model :model) :layers)) collect (make-kv-cache padding))))
 
 (defun cache-offset (cache) (kv-cache-offset (first cache)))
 
@@ -151,6 +155,15 @@ experts are chosen, as each family does in mlx-lm:
     (setf (kv-cache-offset cache) end)
     (values (mx:ref (kv-cache-keys cache) t t (list 0 end))
             (mx:ref (kv-cache-values cache) t t (list 0 end)))))
+
+(defun padded-mask (n offset padding &key window)
+  "Boolean (B 1 N OFFSET+N) mask for left-padded rows: the causal mask,
+with each row's padding keys hidden.  A padding query still sees itself,
+so no row is fully masked (which would make NaNs that leak into values)."
+  (let* ((keys (mx:reshape (mx:arange (+ offset n)) (list 1 1 1 -1)))
+         (queries (mx:reshape (mx:arange offset (+ offset n)) (list 1 1 -1 1))))
+    (mx:logical-and (causal-mask n offset :window window)
+                    (mx:logical-or (mx:greater-equal keys padding) (mx:equal keys queries)))))
 
 (defun causal-mask (n offset &key window)
   "Boolean (N, OFFSET+N) mask: query i sees key j when j <= OFFSET+i (and,
@@ -336,8 +349,16 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
                    (q (funcall rotary q offset))
                    (k (funcall rotary k offset)))
               (multiple-value-bind (keys values) (cache-update cache k v)
-                (let ((out
+                (let* ((padding (kv-cache-padding cache))
+                       (out
                         (cond
+                          (padding
+                           (let ((mask (padded-mask len offset padding :window window)))
+                             (if (arch-attn-softcap arch)
+                                 (softcapped-attention q keys values scale (arch-attn-softcap arch)
+                                                       mask heads kv-heads)
+                                 (fast:scaled-dot-product-attention q keys values scale
+                                                                    :mask-mode "array" :mask-arr mask))))
                           ((arch-attn-softcap arch)
                            (softcapped-attention q keys values scale (arch-attn-softcap arch)
                                                  (and (> len 1) (causal-mask len offset))

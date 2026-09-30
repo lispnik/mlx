@@ -657,3 +657,40 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
   (dolist (name '("mlx-llm-tests.shop" ":mlx-llm-tests.shop" "#:mlx-llm-tests.shop" "MLX-LLM-TESTS.SHOP"))
     (is (eq (find-package :mlx-llm-tests.shop) (mlx.llm::editor-package name)) "~S" name))
   (is (eq (find-package :cl-user) (mlx.llm::editor-package ":no-such-package"))))
+
+;;; ------------------------------------------------------------------
+;;; Batched generation
+
+(test batched-generation-matches-single
+  ;; float32, so padding and batching cannot hide behind rounding
+  (dolist (type '("llama" "gemma3_text"))
+    (random:seed 3)
+    (let* ((model (mlx.llm::make-causal-lm (tiny-config "model_type" type "sliding_window" 4
+                                                        "sliding_window_pattern" 2 "head_dim" 16
+                                                        "query_pre_attn_scalar" 16)))
+           (prompts '((5 17 3 42 8 60 1 33 21) (9 50) (12 7 44 2 30)))
+           (singles (loop for p in prompts
+                          collect (let ((ids '()))
+                                    (llm:generate-tokens model p (lambda (id) (push id ids)) :max-tokens 12)
+                                    (reverse ids))))
+           (batch (llm:generate-tokens-batch model prompts :max-tokens 12)))
+      (is (equal singles batch) "~A: ~S vs ~S" type singles batch)
+      ;; rows stop independently at their end tokens
+      (let* ((stop (third (first singles)))
+             (stopped (llm:generate-tokens-batch model prompts :max-tokens 12 :eos-ids (list stop))))
+        (loop for single in singles for row in stopped
+              do (is (equal (subseq single 0 (or (position stop single) (length single))) row)))))))
+
+(test batched-constrained-generation
+  ;; every row of a batch is its own well-formed form
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256)))
+         (tk (byte-tokenizer)))
+    (setf (llm:model-tokenizer model) tk)
+    (random:seed 4)
+    (let ((forms (mlx.llm::generate-lisp-forms model '(40 1 2) :count 5 :max-tokens 50 :temperature 1.5)))
+      (is (= 5 (length forms)))
+      (loop for (text complete) in forms
+            do (is (lexes-p text :complete complete) "~S" text))
+      ;; row 0 is greedy: the same as generating it alone
+      (is (equal (first (first forms))
+                 (llm:generate-lisp-form model '(40 1 2) :max-tokens 50))))))

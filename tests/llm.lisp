@@ -717,3 +717,33 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
                  (if (zerop i)
                      (is (zerop reused))
                      (is (> reused 100) "only ~D tokens reused" reused)))))))
+
+(test speculative-decoding-matches-greedy
+  ;; with greedy sampling, speculative decoding must give exactly the target's text
+  (random:seed 11)
+  (let* ((target (mlx.llm::make-causal-lm (tiny-config)))
+         (draft (mlx.llm::make-causal-lm (tiny-config "num_hidden_layers" 1 "hidden_size" 32
+                                                     "intermediate_size" 64)))
+         (prompt '(5 17 3 42 8 60 1 33)))
+    (flet ((plain ()
+             (let ((ids '())) (llm:generate-tokens target prompt (lambda (id) (push id ids)) :max-tokens 20)
+               (reverse ids)))
+           (speculative (d k)
+             (let ((ids '()))
+               (multiple-value-bind (count p g acceptance)
+                   (llm:generate-tokens-speculative target d prompt (lambda (id) (push id ids))
+                                                    :max-tokens 20 :draft-tokens k)
+                 (declare (ignore count p g))
+                 (values (reverse ids) acceptance)))))
+      (let ((expected (plain)))
+        (dolist (k '(1 2 3 5))
+          (is (equal expected (speculative draft k)) "k = ~D" k))
+        ;; the target as its own draft: every draft is accepted
+        (multiple-value-bind (ids acceptance) (speculative target 4)
+          (is (equal expected ids))
+          (is (= 1 acceptance)))
+        ;; stops at an end token like GENERATE-TOKENS
+        (let* ((stop (nth 5 expected)) (ids '()))
+          (llm:generate-tokens-speculative target draft prompt (lambda (id) (push id ids))
+                                           :max-tokens 20 :eos-ids (list stop))
+          (is (equal (subseq expected 0 (position stop expected)) (reverse ids))))))))

@@ -321,6 +321,10 @@
                   for i from 1
                   do (format t "~&--- sample ~D~%~A~%" i text))
         (llm:generate model prompt
+                      :draft-model (let ((draft (clingon:getopt cmd :draft)))
+                                     (and draft (progn (format *error-output* "~&Loading draft ~A...~%" draft)
+                                                       (llm:load-model draft))))
+                      :draft-tokens (clingon:getopt cmd :draft-tokens)
                       :max-tokens (clingon:getopt cmd :max-tokens)
                       :temperature temperature
                       :top-p top-p
@@ -340,6 +344,10 @@
    :options (append (model-options)
                     (list (clingon:make-option :flag :long-name "raw" :key :raw
                                                      :description "use the prompt as is, without the chat template")
+                          (clingon:make-option :string :long-name "draft" :key :draft
+                                                       :description "a small model of the same family to decode speculatively with")
+                          (clingon:make-option :integer :long-name "draft-tokens" :key :draft-tokens
+                                                        :description "tokens the draft proposes per step" :initial-value 2)
                           (clingon:make-option :integer :long-name "samples" :short-name #\N :key :samples
                                                         :description "generate this many replies at once, in one batch"
                                                         :initial-value 1)))

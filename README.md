@@ -378,6 +378,28 @@ To get there, the generation loop:
   bf16 rounding;
 - keeps a chunked, preallocated KV cache.
 
+### Speculative decoding
+
+`generate :draft-model` (`mlx-cl generate --draft MODEL`) decodes
+speculatively. A small model of the same family proposes a few tokens,
+and the large model checks them all in one forward pass, which costs
+about as much as one step. At each position the large model samples its
+own token. Drafts are kept while they agree, and the first disagreement
+gives a free token. Every emitted token is the large model's own choice,
+so the output is unchanged, and greedy text is byte-identical. Both KV
+caches are rewound past rejected drafts.
+
+Qwen2.5-Coder-7B drafted by Qwen2.5-Coder-0.5B (both 4-bit, M3), greedy,
+writing a Lisp function:
+
+| draft tokens | tokens/s | drafts accepted |
+| ---: | ---: | ---: |
+| none | 19.7 | |
+| 2 | 34.0 | 72% |
+| 3 | 34.0 | 66% |
+| 4 | 29.9 | 56% |
+| 6 | 23.2 | 47% |
+
 ### Batched generation
 
 `generate-batch` runs several prompts as one batch, and `mlx-cl generate -N 4`

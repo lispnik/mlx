@@ -207,12 +207,16 @@ previous token, overlapping Lisp work with the GPU."
                  (eql 0 (search (bos-string tokenizer) text))))))
 
 (defun generate (model prompt &key (max-tokens 256) (temperature 0.0) (top-p 1.0) seed
-                                   (chat t) system stream (verbose nil) (thinking t))
+                                   (chat t) system stream (verbose nil) (thinking t)
+                                   draft-model (draft-tokens 2))
   "Generate text from MODEL (from LOAD-MODEL) for PROMPT.  With CHAT (the
 default) PROMPT is a user message wrapped in the model's chat template
 (SYSTEM overrides the system prompt); otherwise it is raw text.  When
 STREAM is a stream, text is written to it as it is generated.  With
-VERBOSE, timing is reported on *ERROR-OUTPUT*.  Returns the generated text."
+VERBOSE, timing is reported on *ERROR-OUTPUT*.  With DRAFT-MODEL, a small
+model of the same family, decoding is speculative (see
+GENERATE-TOKENS-SPECULATIVE): the same text, usually faster.  Returns the
+generated text."
   (let* ((tokenizer (or (model-tokenizer model) (error "MODEL has no tokenizer.")))
          (text (if chat
                    (apply-chat-template tokenizer (append (and system (list (cons "system" system)))
@@ -223,19 +227,24 @@ VERBOSE, timing is reported on *ERROR-OUTPUT*.  Returns the generated text."
          (decoder (make-stream-decoder tokenizer))
          (out (make-string-output-stream)))
     (when seed (random:seed seed))
-    (multiple-value-bind (count prompt-seconds seconds)
-        (generate-tokens model ids
-                         (lambda (id)
-                           (let ((piece (decode-step decoder id)))
-                             (write-string piece out)
-                             (when stream (write-string piece stream) (force-output stream))))
-                         :max-tokens max-tokens
-                         :sampler (make-sampler :temperature temperature :top-p top-p)
-                         :eos-ids (eos-tokens tokenizer))
+    (multiple-value-bind (count prompt-seconds seconds acceptance)
+        (let ((emit (lambda (id)
+                      (let ((piece (decode-step decoder id)))
+                        (write-string piece out)
+                        (when stream (write-string piece stream) (force-output stream)))))
+              (sampler (make-sampler :temperature temperature :top-p top-p)))
+          (if draft-model
+              (generate-tokens-speculative model draft-model ids emit
+                                           :max-tokens max-tokens :sampler sampler
+                                           :eos-ids (eos-tokens tokenizer) :draft-tokens draft-tokens)
+              (generate-tokens model ids emit :max-tokens max-tokens :sampler sampler
+                                              :eos-ids (eos-tokens tokenizer))))
       (when verbose
         (when stream (fresh-line stream) (force-output stream))
-        (format *error-output* "~&~D prompt tokens at ~,1F tok/s; ~D generated at ~,1F tok/s; peak memory ~,2F GB~%"
+        (format *error-output* "~&~D prompt tokens at ~,1F tok/s; ~D generated at ~,1F tok/s;~
+                                 ~@[ ~D% of drafts accepted;~] peak memory ~,2F GB~%"
                 (length ids) (/ (length ids) (max prompt-seconds 1e-6))
                 count (/ count (max seconds 1e-6))
+                (and draft-model acceptance (round (* 100 acceptance)))
                 (/ (mx:peak-memory) 1e9))))
     (get-output-stream-string out)))

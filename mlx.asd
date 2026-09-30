@@ -64,6 +64,7 @@
                (:file "hub")
                (:file "generate")
                (:file "batch")
+               (:file "speculative")
                (:file "lisp")
                (:file "complete")))
 

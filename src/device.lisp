@@ -126,15 +126,36 @@
 means the default stream of the default device.  May also be a device, or
 :CPU / :GPU.  Bind it with WITH-STREAM or WITH-DEVICE.")
 
-(defvar *stream-cache* (make-hash-table :test 'equal)
-  "Default streams by device (type . index).  Reset by REINITIALIZE and by
-changes made through SET-DEFAULT-DEVICE / SET-DEFAULT-STREAM.")
+;;; MLX streams belong to the thread that made them: using one from another
+;;; thread fails ("There is no Stream(gpu, 0) in current thread").  So the
+;;; default streams are cached per thread -- SLY and SLIME, for instance,
+;;; evaluate each request in a thread of its own.  The last thread's cache
+;;; is kept at hand, so a single-threaded program pays one EQ test.
 
-(defvar *default-stream-cache* nil "Cached stream of the default device.")
+(defstruct (thread-streams (:constructor make-thread-streams ()))
+  (default nil)                                   ; the default device's stream
+  (by-device (make-hash-table :test 'equal)))     ; (type . index) -> stream
+
+(defvar *thread-streams* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "Each thread's THREAD-STREAMS.  Reset by REINITIALIZE and by changes made
+through SET-DEFAULT-DEVICE / SET-DEFAULT-STREAM.")
+
+(defvar *last-thread-streams* (cons nil nil) "(thread . its THREAD-STREAMS)")
+
+(declaim (inline current-thread-streams))
+(defun current-thread-streams ()
+  (let ((last *last-thread-streams*)
+        (thread sb-thread:*current-thread*))
+    (if (eq (car last) thread)
+        (cdr last)
+        (let ((entry (or (gethash thread *thread-streams*)
+                         (setf (gethash thread *thread-streams*) (make-thread-streams)))))
+          (setf *last-thread-streams* (cons thread entry))
+          entry))))
 
 (defun reset-stream-cache ()
-  (setf *stream-cache* (make-hash-table :test 'equal)
-        *default-stream-cache* nil))
+  (setf *thread-streams* (make-hash-table :test 'eq :weakness :key :synchronized t)
+        *last-thread-streams* (cons nil nil)))
 
 (defun mlx:default-stream (&optional device)
   "The default stream of DEVICE (default: the default device)."
@@ -170,22 +191,26 @@ changes made through SET-DEFAULT-DEVICE / SET-DEFAULT-STREAM.")
   nil)
 
 (defun cached-device-stream (device)
-  (let ((key (cons (mlx:device-type device) (mlx:device-index device))))
-    (or (gethash key *stream-cache*)
-        (setf (gethash key *stream-cache*) (mlx:default-stream device)))))
+  (let ((key (cons (mlx:device-type device) (mlx:device-index device)))
+        (cache (thread-streams-by-device (current-thread-streams))))
+    (or (gethash key cache)
+        (setf (gethash key cache) (mlx:persist (mlx:default-stream device))))))
 
 (defun resolve-stream (s)
   "Foreign stream pointer for an operation's :STREAM argument S."
   (let ((s (or s mlx:*stream*)))
     (etypecase s
-      (null (ptr (or *default-stream-cache*
-                     (setf *default-stream-cache* (mlx:default-stream)))))
+      (null (let ((streams (current-thread-streams)))
+              (ptr (or (thread-streams-default streams)
+                       ;; cached streams must outlive the WITH-SCOPE that first needed them
+                       (setf (thread-streams-default streams) (mlx:persist (mlx:default-stream)))))))
       (mlx:mlx-stream (ptr s))
       (mlx:mlx-device (ptr (cached-device-stream s)))
       ((member :cpu :gpu)
-       (ptr (or (gethash (cons s 0) *stream-cache*)
-                (setf (gethash (cons s 0) *stream-cache*)
-                      (mlx:default-stream (mlx:make-device s)))))))))
+       (let ((cache (thread-streams-by-device (current-thread-streams))))
+         (ptr (or (gethash (cons s 0) cache)
+                  (setf (gethash (cons s 0) cache)
+                        (mlx:persist (mlx:default-stream (mlx:make-device s)))))))))))
 
 (defmacro mlx:with-stream ((stream) &body body)
   "Run BODY with operations defaulting to STREAM (a stream, device, :CPU or :GPU)."

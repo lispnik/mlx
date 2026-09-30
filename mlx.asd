@@ -33,6 +33,7 @@
                (:file "nn/module")
                (:file "nn/functions")
                (:file "nn/layers")
+               (:file "nn/defnet")
                (:file "nn/optimizers"))
   :in-order-to ((test-op (test-op "mlx/tests"))))
 
@@ -48,12 +49,13 @@
                (:file "transforms")
                (:file "io")
                (:file "system")
-               (:file "nn"))
+               (:file "nn")
+               (:file "defnet"))
   :perform (test-op (o c) (symbol-call :mlx-tests :run-tests)))
 
 (defsystem "mlx/llm"
   :description "Language models on MLX: Hugging Face tokenizers, Llama-family models, generation."
-  :depends-on ("mlx" "com.inuoe.jzon")
+  :depends-on ("mlx" "com.inuoe.jzon" "sb-introspect")
   :pathname "src/llm/"
   :serial t
   :components ((:file "package")
@@ -61,7 +63,23 @@
                (:file "models")
                (:file "hub")
                (:file "generate")
-               (:file "lisp")))
+               (:file "lisp")
+               (:file "complete")))
+
+(defsystem "mlx/symreg"
+  :description "Symbolic regression: genetic programming over Lisp expressions, evaluated and tuned on the GPU."
+  :depends-on ("mlx")
+  :pathname "src/symreg/"
+  :serial t
+  :components ((:file "package")
+               (:file "symreg")))
+
+(defsystem "mlx/symreg-tests"
+  :description "FiveAM tests for mlx/symreg."
+  :depends-on ("mlx/symreg" "fiveam")
+  :pathname "tests/"
+  :components ((:file "symreg"))
+  :perform (test-op (o c) (symbol-call :mlx-symreg-tests :run-tests)))
 
 (defsystem "mlx/llm-tests"
   :description "FiveAM tests for mlx/llm."
@@ -76,7 +94,7 @@
 
 (defsystem "mlx/cli"
   :description "Command-line driver for mlx, built with clingon."
-  :depends-on ("mlx" "mlx/llm" "clingon")
+  :depends-on ("mlx" "mlx/llm" "mlx/symreg" "clingon")
   :pathname "cli/"
   :serial t
   :components ((:file "main"))

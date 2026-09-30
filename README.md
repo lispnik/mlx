@@ -62,9 +62,11 @@ If libmlxc isn't in a standard location, set `MLX_C_LIBRARY=/path/to/libmlxc.dyl
 | `src/*.lisp` | Hand-written layer: arrays, devices and streams, closures and transforms, I/O, kernels |
 | `src/nn/` | `mlx.nn` and `mlx.optimizers` |
 | `src/llm/` | Tokenizer, the configurable decoder model, generation, Hub download (system `mlx/llm`) |
+| `src/symreg/` | Symbolic regression by genetic programming on the GPU (system `mlx/symreg`) |
 | `examples/` | MNIST and a character-level GPT, runnable from the project root |
-| `tests/` | FiveAM suites (`mlx/tests`, `mlx/llm-tests`) and reference fixtures |
+| `tests/` | FiveAM suites (`mlx/tests`, `mlx/llm-tests`, `mlx/symreg-tests`) and reference fixtures |
 | `cli/main.lisp` | clingon command-line driver |
+| `emacs/` | `mlx-complete.el`: model completion in SLY/SLIME, with ERT tests (`make test-emacs`) |
 
 To regenerate after upgrading mlx-c, run `make generate`, or
 `sbcl --script tools/generate.lisp /path/to/include/mlx/c`.
@@ -91,6 +93,7 @@ Two guards protect against mlx-c changes:
 | `mlx.nn` | `mlx.nn` | `module` `linear` `conv2d` `multi-head-attention` `cross-entropy` `value-and-grad` |
 | `mlx.optimizers` | `mlx.optimizers` | `adam` `adamw` `sgd` `cosine-decay` `clip-grad-norm` |
 | `mlx.llm` (system `mlx/llm`) | `mlx-lm` | `load-model` `generate` `encode` `apply-chat-template` |
+| `mlx.symreg` (system `mlx/symreg`) | (PySR, in spirit) | `symbolic-regression` `expression-function` `expression->mlx` |
 | `mlx-ffi` | the C API, 1:1 | `mlx-array-new-data` `mlx-add` ... |
 
 `mlx` **uses no packages**. Its symbols deliberately share names with CL
@@ -242,6 +245,64 @@ them faster and their bf16 results identical to Python's.
 so memory stays flat across training steps. Arrays stored in a module,
 optimizer or cache are exempt from `with-scope` (see `mx:persist`).
 
+### `defnet`: shapes checked at compile time
+
+`nn:defnet` describes a network as a dataflow of stages. Its macro infers
+every intermediate shape while it expands:
+
+```lisp
+(nn:defnet cnn ((x (batch 28 28 1)) &key (classes 10))
+  (-> x
+      (conv2d 16 3 :padding 1) relu (max-pool-2d 2)    ; (batch 14 14 16)
+      (conv2d 32 3 :padding 1) relu (max-pool-2d 2)    ; (batch 7 7 32)
+      flatten                                          ; (batch 1568)
+      (linear 128) relu (dropout 0.25)                 ; linear gets its 1568 inputs itself
+      (linear classes)))
+
+(funcall (cnn :classes 3) images)    ; the constructor takes the hyperparameters
+(nn:net-summary 'cnn)                ; each stage's shape and parameter count
+```
+
+- **Checks at compile time.** Layers take their input sizes from the
+  inferred shapes. A mismatch signals `nn:shape-error` when the file
+  compiles, naming the form:
+
+  ```
+  defnet lm: a residual branch must keep the shape (b s 64), but it gives (b s 32)
+    in (residual (layer-norm) (linear 32))
+  defnet bad: attention: 7 heads do not divide the width 60
+  defnet bad: cannot broadcast (b 6) with (b 5): 6 vs 5
+  ```
+
+- **Three kinds of dimension.** A dimension can be:
+  - an integer;
+  - a hyperparameter (an `&key` parameter, known when the network is made);
+  - a runtime dimension (any other symbol, such as `batch`), bound from the
+    inputs on each call and checked for consistency across them.
+- **Composition.** A one-input network can be a stage of another. Its
+  hyperparameters are inferred from the shape it is applied to:
+
+  ```lisp
+  (nn:defnet decoder-block ((x (b s dims)) &key dims (heads 4) (hidden 256))
+    (-> x
+        (residual (layer-norm) (attention heads :mask :causal))
+        (residual (layer-norm) (linear hidden) gelu (linear dims))))
+
+  (nn:defnet lm ((tokens (b s)) &key (vocab 1000) (dims 64))
+    (-> tokens (embedding vocab dims) (repeat 2 (decoder-block)) (rms-norm) (linear vocab)))
+  ```
+
+**Stages:**
+- `linear`, `conv1d`, `conv2d`, max/avg pooling, `embedding`, `layer-norm`,
+  `rms-norm`, `dropout` and `attention`;
+- `flatten`, `reshape`, `transpose`, and `mean`/`sum`/`max` over an axis;
+- the activations;
+- `residual`, `repeat` and `elementwise`.
+
+**Expressions:** `->`, `let*`, the elementwise operators `+ - * /
+maximum minimum` (with broadcasting), `matmul` and `concat`. The MNIST
+example's CNN is written this way.
+
 ## Language models
 
 ```lisp
@@ -363,6 +424,95 @@ Harder exercises can exhaust the attempts on logic errors. The 3B model is
 noticeably weaker at Lisp; its output matches mlx-lm's, so the model is the
 limit, not the implementation.
 
+### Completion in Emacs, from the live image
+
+`emacs/mlx-complete.el` completes Common Lisp at point in SLY or SLIME,
+with a fill-in-the-middle code model (Qwen2.5-Coder-1.5B, 1 GB) running
+inside the Lisp image you're connected to. That placement lets it use what
+the image knows:
+
+- **The live image in the prompt.** The lambda lists and docstrings of the
+  functions, macros and variables used near point come from the image, as
+  do the current package's other definitions. The model calls your
+  functions with their real arguments.
+- **Reader-constrained.** Decoding continues from the lexer state of the
+  top-level form being edited, so a completion never breaks its structure.
+  Closing parens already after point (an editor's auto-pairing) are left
+  to close the form.
+- **Checked by the compiler.** The finished form is compiled in the image,
+  without being evaluated, and any undefined functions or variables are
+  shown with the completion.
+
+```elisp
+(add-to-list 'load-path "/path/to/mlx/emacs")
+(require 'mlx-complete)
+(add-hook 'lisp-mode-hook #'mlx-complete-mode)
+```
+
+`C-c TAB` shows a completion as grey text: `TAB` accepts it, and any other
+key dismisses it. `C-u C-c TAB` completes only to the end of the line. The
+first request loads `mlx/llm` and the model (`mlx-complete-model`); after
+that a completion takes 0.3–0.5 s on an M3. From Lisp, the same completion
+is available as `mlx.llm:complete-lisp`.
+
+```lisp
+(defun cart-total (items)
+  "The total of ITEMS."
+  █)          ; => (reduce #'+ items :key #'item-total)   -- ITEM-TOTAL lives in the image
+```
+
+## Symbolic regression
+
+`mlx/symreg` searches for a formula that fits data. Candidates are Lisp
+expressions; genetic programming breeds them and the GPU scores them.
+
+```lisp
+(asdf:load-system "mlx/symreg")
+
+(mlx.symreg:symbolic-regression rows ys :variables '(mass distance) :time-limit 60)
+;; => #<CANDIDATE size 6 loss 3.442E-11 (* 6.674 (/ mass (square distance)))>, front
+```
+
+```
+$ bin/mlx-cl symreg -f '(+ (square x0) (* 2.5 (sin x1)))'   # rediscover a formula
+$ bin/mlx-cl symreg -t 60 gravity.csv                       # last column = target
+...
+size  loss (MSE / variance)  expression
+   1               1.00      7.3012
+   5              0.547      (+ 22.834 (* -5.1656 distance))
+   6              3.442E-11  (* 6.674 (/ mass (square distance)))
+
+best: (lambda (mass distance) (* 6.674003 (/ mass (square distance))))
+```
+
+The whole population is evaluated as one computation:
+
+- **One compiled GPU program.** Each generation compiles every expression
+  to a fixed-length postfix program. A vectorized stack machine, one MLX
+  graph compiled once, runs all 1000 programs on all samples at the same
+  time. Operators are protected (division by ~0, log and sqrt of
+  negatives, exp overflow), so no candidate produces NaN, which would
+  otherwise poison the gradients.
+- **Constants tuned by gradient.** The same graph is differentiated with
+  respect to the programs' constants, and Adam tunes every candidate's
+  constants at once, inside the compiled step.
+- **Linear scaling.** Each candidate f is judged as a + b·f with the
+  least-squares a and b, computed in closed form on the GPU. Evolution then
+  only has to find a formula's shape.
+- **Evolution on the Lisp side.** Subtree crossover, subtree, point, hoist
+  and constant mutations, tournament selection and elitism all work on
+  plain s-expressions.
+
+The result is a Pareto front of size against loss. `expression-function`
+compiles any expression into a Lisp function, and `expression->mlx` builds
+it as an MLX graph.
+
+On an M3, a generation of 1000 candidates over 300 samples takes about
+0.8 s. A test suite of six problems (Kepler's law, a harmonic mean, a
+Gaussian, a cubic, a trig/rational mix and a double logarithm, three seeds
+each) was solved to a loss below 1e-8 in 12 of 18 runs, with a 30-second
+limit on each run.
+
 ## Memory management
 
 Each MLX object is owned by a Lisp handle with a finalizer, so garbage
@@ -378,6 +528,12 @@ though, and GC can't see that pressure. In loops, free deterministically:
 
 `mx:free` releases a handle immediately. Using a freed handle signals a Lisp
 error; it never touches freed memory.
+
+**Threads.** MLX streams belong to the thread that creates them. Each
+thread gets its own default streams, so operations work from any thread
+(SLY and SLIME evaluate requests in threads of their own). A lazy array,
+though, must be evaluated on the thread that built it: call `mx:eval` before
+handing one to another thread.
 
 Handles created inside `with-scope` skip finalizer registration, which costs
 more than a small op; only survivors leaving the outermost scope get one.
@@ -407,6 +563,7 @@ $ bin/mlx-cl chat -m mlx-community/gemma-3-1b-it-4bit
 $ bin/mlx-cl generate -m mlx-community/Qwen3-0.6B-4bit --no-think "Explain monads"
 $ bin/mlx-cl download mlx-community/Qwen2.5-0.5B-Instruct-4bit
 $ bin/mlx-cl lisp -v 'Define (flatten tree)' -T "(equal (flatten '(1 (2))) '(1 2))"
+$ bin/mlx-cl symreg -f '(* x0 (sqrt x0))'                    # symbolic regression
 ```
 
 ## Implementation notes

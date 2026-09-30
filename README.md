@@ -503,7 +503,12 @@ the image knows:
 `C-c TAB` shows a completion as grey text: `TAB` accepts it, and any other
 key dismisses it. `C-u C-c TAB` completes only to the end of the line. The
 first request loads `mlx/llm` and the model (`mlx-complete-model`); after
-that a completion takes 0.3–0.5 s on an M3. From Lisp, the same completion
+that a completion takes 0.2–0.5 s on an M3. Consecutive requests share
+most of their prompt: the image context is ordered to stay stable, and the
+buffer text up to the edit is unchanged. So the KV cache of the last
+request is kept, and only the part after the longest common prefix is
+prefilled. For a prompt of about 1,000 tokens that cuts a completion from
+1.15 s to about 0.2 s, with identical output. From Lisp, the same completion
 is available as `mlx.llm:complete-lisp`.
 
 ```lisp

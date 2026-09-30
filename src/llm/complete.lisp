@@ -89,30 +89,38 @@ comments and character literals are skipped."
              (format nil ";; class ~S~@[ -- ~A~]" symbol (doc 'type)))))))
 
 (defun image-context (text package &key (limit 60) (others 100))
-  "Comments describing, from the live image, the definitions TEXT uses
-(outside COMMON-LISP), then PACKAGE's own definitions: fully up to LIMIT
-lines in all, then by name up to OTHERS more."
+  "Comments describing, from the live image, PACKAGE's own definitions
+(fully up to LIMIT lines, then by name up to OTHERS more), then the
+definitions from other packages that TEXT uses.  The package's part comes
+first and in a fixed order: it changes rarely, so successive prompts share
+a long prefix whose KV cache can be reused (see COMPLETE-LISP)."
   (let* ((cl (find-package :common-lisp))
-         (used (loop for token in (symbol-tokens text)
-                     for s = (resolve-token token package)
-                     when (and s (not (eq (symbol-package s) cl)) (not (keywordp s)))
-                       collect s))
          (own (let ((symbols '()))
                 (do-symbols (s package)
                   (when (and (eq (symbol-package s) package) (or (fboundp s) (boundp s) (find-class s nil)))
                     (pushnew s symbols)))
                 (sort symbols #'string<)))
-         (lines '()) (described '()) (named '()))
-    (dolist (s (append used (set-difference own used)))
+         (used (loop for token in (symbol-tokens text)
+                     for s = (resolve-token token package)
+                     when (and s (not (eq (symbol-package s) cl)) (not (keywordp s)))
+                       collect s))
+         (lines '()) (named '()) (near '()))
+    (dolist (s own)
       (let ((line (and (< (length lines) limit) (describe-for-context s package))))
-        (cond (line (push line lines) (push s described))
-              ((and (member s own) (< (length named) others)) (push s named)))))
+        (cond (line (push line lines))
+              ((< (length named) others) (push s named)))))
+    ;; from other packages, or own ones past the limit
+    (dolist (s used)
+      (unless (and (member s own) (or (< (position s own) limit) (member s named)))
+        (let ((line (describe-for-context s package)))
+          (when (and line (< (length near) limit)) (pushnew line near :test #'string=)))))
     (let ((*package* package) (*print-case* :downcase))
       (format nil ";;; The running Lisp image.  Current package: ~A~@[ (uses ~{~A~^, ~})~].~%~
-                   ~@[;;; Its definitions, those used near point first:~%~{~A~%~}~]~
-                   ~@[;;; Also defined: ~{~S~^ ~}~%~]"
+                   ~@[;;; Its definitions:~%~{~A~%~}~]~
+                   ~@[;;; Also defined: ~{~S~^ ~}~%~]~
+                   ~@[;;; Used near point:~%~{~A~%~}~]"
               (package-name package) (mapcar #'package-name (package-use-list package))
-              (reverse lines) (reverse named)))))
+              (reverse lines) (reverse named) (reverse near)))))
 
 ;;; ------------------------------------------------------------------
 ;;; The prompt and decoding
@@ -143,15 +151,26 @@ top-level form to point), or NIL when it isn't one."
          (not (lisp-form-complete-p lexer))
          lexer)))
 
+(defstruct (prompt-cache (:constructor make-prompt-cache ()))
+  "The KV cache of the last completion and the token ids in it, so the next
+prompt, which usually shares a long prefix, only prefills what changed."
+  model (ids #()) kv)
+
+(defun common-prefix-length (a b)
+  (let ((n (min (length a) (length b))))
+    (or (mismatch a b :end1 n :end2 n) n)))
+
 (defun complete-lisp (model form-prefix &key (context "") (suffix "") (package *package*) file
-                                             (mode :form) (max-tokens 128))
+                                             (mode :form) (max-tokens 128) reuse)
   "Complete the Lisp at point.  FORM-PREFIX is the text from the start of
 the top-level form being edited to point (\"\" at top level), CONTEXT the
 text before that and SUFFIX the text after point.  MODE :FORM runs until
 the model stops or the form closes; :LINE also stops at a newline.
-Decoding follows the reader, so the form stays well formed.  Returns
-(values completion complaints): what the compiler, in this image, says is
-undefined in the completed form."
+Decoding follows the reader, so the form stays well formed.  REUSE, a
+PROMPT-CACHE, keeps the KV cache between calls: only the part of the
+prompt after its longest common prefix with the last one is prefilled.
+Returns (values completion complaints reused-tokens): COMPLAINTS is what
+the compiler, in this image, says is undefined in the completed form."
   (let* ((tokenizer (model-tokenizer model))
          (package (or (find-package package) (find-package :cl-user)))
          (constraint (tokenizer-constraint tokenizer))
@@ -170,12 +189,25 @@ undefined in the completed form."
                    (subseq form-prefix (if last (1+ last) 0))))
          (prompt (encode tokenizer (completion-prompt context (subseq form-prefix 0 (- (length form-prefix) (length healed)))
                                                       suffix package file)))
-         (cache (make-cache model))
+         (prompt-vector (coerce prompt 'vector))
+         ;; reuse the cached prefix (but always recompute the last prompt token)
+         (reused (if (and reuse (eq (prompt-cache-model reuse) model) (prompt-cache-kv reuse))
+                     (min (common-prefix-length (prompt-cache-ids reuse) prompt-vector) (1- (length prompt)))
+                     0))
+         (cache (if (plusp reused)
+                    (let ((kv (prompt-cache-kv reuse)))
+                      (dolist (layer kv kv) (setf (kv-cache-offset layer) reused)))
+                    (make-cache model)))
+         (fed (make-array (length prompt) :adjustable t :fill-pointer reused
+                                          :initial-contents prompt-vector))
          (ids '()) (vocab nil) (tail nil))
     (when (and lexer (not closed-by-suffix) (plusp reserved))
       (decf (lisp-lexer-depth lexer) reserved))
-    (mx:with-scope ()
-      (funcall model (mx:from-lisp (list (butlast prompt)) :dtype :int32) cache))
+    (when (< reused (1- (length prompt)))
+      (mx:with-scope ()
+        (funcall model (mx:from-lisp (list (subseq prompt reused (1- (length prompt)))) :dtype :int32) cache)
+        (mx:eval (loop for c in cache collect (kv-cache-keys c) collect (kv-cache-values c)))))
+    (setf (fill-pointer fed) (1- (length prompt)))
     (let ((input (last prompt)))
       (loop repeat max-tokens
             do (let ((id (mx:with-scope ()
@@ -195,6 +227,7 @@ undefined in the completed form."
                                                                                         :forbid-close closed-by-suffix))
                                                               :axis -1)))
                                    (t unconstrained))))))
+                 (vector-push-extend (first input) fed)       ; now in the cache
                  (unless id (return))
                  (when lexer (lex-octets lexer (svref (lisp-constraint-octets constraint) id)))
                  (push id ids)
@@ -202,13 +235,19 @@ undefined in the completed form."
                  (when (or (and lexer (lisp-form-complete-p lexer))
                            (and (eq mode :line) (find #\Newline (decode tokenizer (reverse ids)))))
                    (return)))))
+    (when reuse
+      (setf (prompt-cache-model reuse) model
+            (prompt-cache-ids reuse) (coerce fed 'simple-vector)
+            (prompt-cache-kv reuse) cache))
     (let* ((text (concatenate 'string (decode tokenizer (reverse ids)) (or tail "")))
            (text (subseq text (let ((n (min (length healed) (length text))))
                                 (or (mismatch healed text :end1 n :end2 n) n))))
            (text (if (eq mode :line) (subseq text 0 (or (position #\Newline text) (length text))) text))
            (text (if (and lexer (lisp-form-complete-p lexer)) (string-right-trim '(#\Space #\Tab #\Newline) text) text)))
-      (values text (let ((form (completed-form form-prefix text suffix)))
-                     (and form (compiler-complaints form package)))))))
+      (values text
+              (let ((form (completed-form form-prefix text suffix)))
+                (and form (compiler-complaints form package)))
+              reused))))
 
 (defun compiler-complaints (text package)
   "Compile the form TEXT (read in PACKAGE, without evaluating anything) and
@@ -285,6 +324,10 @@ frob\").  Symbols the reader had to create are uninterned afterwards."
   (let ((name (string-left-trim "#:" (string-trim '(#\Space #\" ) name))))
     (or (find-package name) (find-package (string-upcase name)) (find-package :cl-user))))
 
+(defvar *prompt-cache* (make-prompt-cache)
+  "The completion thread's PROMPT-CACHE: consecutive editor requests share
+most of their prompt.")
+
 (defun emacs-complete (form-prefix context suffix package-name file mode)
   "For emacs/mlx-complete.el: complete at point with *COMPLETION-MODEL*.
 Returns (completion complaints seconds), or (\"\" nil seconds
@@ -300,7 +343,8 @@ error-message)."
                    (complete-lisp (completion-model) form-prefix
                                   :context context :suffix suffix
                                   :package (editor-package package-name)
-                                  :file file :mode (if (eq mode :line) :line :form))))))
+                                  :file file :mode (if (eq mode :line) :line :form)
+                                  :reuse *prompt-cache*)))))
             (list text complaints (elapsed)))
         (error (e) (list "" nil (elapsed) (princ-to-string e)))))))
 

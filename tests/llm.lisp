@@ -694,3 +694,26 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
       ;; row 0 is greedy: the same as generating it alone
       (is (equal (first (first forms))
                  (llm:generate-lisp-form model '(40 1 2) :max-tokens 50))))))
+
+(test completion-prompt-cache
+  ;; reusing the KV cache of the previous prompt changes nothing but speed
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256)))
+         (tk (byte-tokenizer))
+         (reuse (mlx.llm::make-prompt-cache))
+         (context "(defun helper (x) (+ x 1))
+
+"))
+    (setf (llm:model-tokenizer model) tk)
+    (loop for prefix in '("(defun f (x)
+  (list " "(defun f (x)
+  (list x " "(defun g (y)
+  (cons ")
+          for i from 0
+          do (multiple-value-bind (fresh) (llm:complete-lisp model prefix :context context :max-tokens 12)
+               (multiple-value-bind (cached complaints reused)
+                   (llm:complete-lisp model prefix :context context :max-tokens 12 :reuse reuse)
+                 (declare (ignore complaints))
+                 (is (equal fresh cached) "~S: ~S vs ~S" prefix fresh cached)
+                 (if (zerop i)
+                     (is (zerop reused))
+                     (is (> reused 100) "only ~D tokens reused" reused)))))))

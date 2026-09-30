@@ -371,6 +371,7 @@ mode depth): classes is a vector of :open, :close, :ws, :content or :comment."
             (*package* package)
             (*read-eval* nil)
             (warnings '())
+            (backtrace '())
             (output (make-string-output-stream)))
        (flet ((unqualify (text)       ; drop the sandbox's package prefix
                 (let ((prefix (concatenate 'string (package-name package) \"::\")))
@@ -380,11 +381,57 @@ mode depth): classes is a vector of :open, :close, :ws, :content or :comment."
                   text))
               (show (x) (let ((*package* package) (*print-length* 40) (*print-level* 8) (*print-circle* t))
                          (prin1-to-string x))))
+         (labels ((own-p (name) (and (symbolp name) (eq (symbol-package name) package)))
+                  (brief (x) (let ((*package* package) (*print-length* 8) (*print-level* 4) (*print-circle* t)
+                                   (*print-pretty* nil))
+                               (prin1-to-string x)))
+                  (calls-in-progress ()
+                    ;; the innermost calls to the code's own functions, with arguments
+                    (let ((frames '()))
+                      (ignore-errors
+                       (sb-debug:map-backtrace
+                        (lambda (frame)
+                          (multiple-value-bind (name args) (ignore-errors (sb-debug::frame-call frame))
+                            (when (and (own-p name) (< (length frames) 6))
+                              (push (brief (cons name args)) frames))))
+                        :count 400))
+                      (nreverse frames)))
+                  (trace-calls (form)
+                    ;; the calls FORM makes to the code's own functions, and their results
+                    (let ((originals '()) (lines '()) (depth 0) (limit 18))
+                      (do-symbols (sym package)
+                        (when (and (own-p sym) (fboundp sym) (not (macro-function sym))
+                                   (not (special-operator-p sym))
+                                   (not (typep (fdefinition sym) 'generic-function))
+                                   (not (assoc sym originals)))
+                          (let ((original (fdefinition sym)) (name sym))
+                            (push (cons sym original) originals)
+                            (setf (fdefinition sym)
+                                  (lambda (&rest args)
+                                    (when (< (length lines) limit)
+                                      (push (format nil \"~A~A\" (make-string (* 2 depth) :initial-element #\\Space)
+                                                          (brief (cons name args))) lines))
+                                    (incf depth)
+                                    (let ((results (unwind-protect (multiple-value-list (apply original args))
+                                                     (decf depth))))
+                                      (when (< (length lines) limit)
+                                        (push (format nil \"~A=> ~A\" (make-string (* 2 depth) :initial-element #\\Space)
+                                                                (brief (first results))) lines))
+                                      (values-list results)))))))
+                      (unwind-protect
+                           (handler-bind ((warning #'muffle-warning))
+                             (ignore-errors (eval form)))
+                        (loop for (sym . f) in originals do (setf (fdefinition sym) f)))
+                      (when (>= (length lines) limit) (push \"...\" lines))
+                      (nreverse lines))))
          (unwind-protect
               (handler-case
                   (handler-bind ((warning (lambda (w)
                                             (push (unqualify (princ-to-string w)) warnings)
-                                            (muffle-warning w))))
+                                            (muffle-warning w)))
+                                 (serious-condition (lambda (c)
+                                                      (declare (ignore c))
+                                                      (unless backtrace (setf backtrace (calls-in-progress))))))
                     (let* ((*standard-output* output)
                            (forms (with-input-from-string (in code)
                                     (loop for f = (read in nil in) until (eq f in) collect f)))
@@ -401,11 +448,22 @@ mode depth): classes is a vector of :open, :close, :ws, :content or :comment."
                                                  (format nil \"~A returned false\" (show test))))))
                       (list :ok (null failures) :value (show value)
                             :output (get-output-stream-string output)
-                            :failures failures :warnings (reverse warnings))))
+                            :failures failures :warnings (reverse warnings)
+                            ;; how the first failing test ran
+                            :calls (let ((test (loop for text in tests
+                                                     for test = (read-from-string text)
+                                                     unless (ignore-errors (eval test)) return test)))
+                                     (and test
+                                          (mapcar #'unqualify
+                                                  (trace-calls (if (and (consp test) (= (length test) 3)
+                                                                        (member (car test) '(= eql equal equalp string= char=)))
+                                                                   (second test)
+                                                                   test))))))))
                 (serious-condition (e)
                   (list :ok nil :error (unqualify (format nil \"~A: ~A\" (type-of e) e))
-                        :output (get-output-stream-string output) :warnings (reverse warnings))))
-           (delete-package package)))))"
+                        :output (get-output-stream-string output) :warnings (reverse warnings)
+                        :backtrace (mapcar #'unqualify backtrace))))
+           (delete-package package))))))"
   "The evaluator, as CL-USER source text: it runs in a child SBCL (which has
 none of our packages) or, compiled, in a thread of this image.  Given CODE
 and TESTS strings it returns a plist describing what happened.")
@@ -487,11 +545,16 @@ thread of this image.  Returns a plist: :OK, :VALUE, :OUTPUT, :FAILURES,
 (defparameter *lisp-system-prompt*
   "You are an expert Common Lisp programmer. Reply with exactly one Common Lisp form and nothing else: no explanation and no Markdown. To define several things, wrap them in PROGN. Use only standard Common Lisp: no libraries are available (no Quicklisp, Alexandria, split-sequence or cl-ppcre), so write any helpers yourself. Do not include tests or example calls: the tests are run separately.")
 
-(defun feedback (result)
-  "The message telling the model what went wrong with its code."
+(defun feedback (result &key (diagnostics t))
+  "The message telling the model what went wrong with its code.  With
+DIAGNOSTICS, it shows the calls in progress at an error, or the calls a
+failing test made, with arguments and results."
   (with-output-to-string (s)
     (cond ((getf result :error)
            (format s "Evaluating your code signalled an error:~%~A~%" (clip (getf result :error)))
+           (when (and diagnostics (getf result :backtrace))
+             (format s "Calls in progress when it happened, innermost first:~%~{  ~A~%~}"
+                     (mapcar (lambda (line) (clip line 200)) (getf result :backtrace))))
            (when (search "UNDEFINED-FUNCTION" (getf result :error))
              (format s "That function is not part of Common Lisp, and no libraries are loaded: ~
                         define it yourself, in the same PROGN.~%"))
@@ -500,7 +563,10 @@ thread of this image.  Returns a plist: :OK, :VALUE, :OUTPUT, :FAILURES,
                         Write the helper functions you need yourself.~%")))
           ((getf result :failures)
            (format s "Your code ran, but these tests failed:~%~{- ~A~%~}"
-                   (mapcar #'clip (getf result :failures)))))
+                   (mapcar #'clip (getf result :failures)))
+           (when (and diagnostics (getf result :calls))
+             (format s "The calls the first failing test made, with results:~%~{  ~A~%~}"
+                     (mapcar (lambda (line) (clip line 200)) (getf result :calls))))))
     (when (getf result :warnings)
       (format s "Compiler warnings:~%~{- ~A~%~}"
               (mapcar (lambda (w) (clip w 300))
@@ -540,7 +606,7 @@ decoding."
 
 (defun write-lisp (model task &key tests (attempts 4) (candidates 1) (isolation :process) (timeout 10)
                                    (max-tokens 768) (temperature 0.0) (retry-temperature 0.7)
-                                   (constrained t) (repair-parens t)
+                                   (constrained t) (repair-parens t) (diagnostics t)
                                    (stream *standard-output*))
   "Ask MODEL to write Common Lisp for TASK (a string); TESTS are strings of
 forms that must return true.  Each attempt generates CANDIDATES
@@ -550,7 +616,9 @@ disagree, and evaluates them with the tests (see EVALUATE-LISP) until one
 passes.  Otherwise the error, warnings or failures of the first go back to
 the model, up to ATTEMPTS times.  With one candidate, retries sample at
 RETRY-TEMPERATURE, and one repeating an earlier attempt is sampled again.
-CONSTRAINED and REPAIR-PARENS turn those techniques off, for comparison.
+The feedback includes, with DIAGNOSTICS, the calls in progress at an error
+or the calls a failing test made (see FEEDBACK).  CONSTRAINED,
+REPAIR-PARENS and DIAGNOSTICS turn those techniques off, for comparison.
 Progress goes to STREAM.  Returns (values code success-p result
 attempts-used)."
   (let* ((tokenizer (model-tokenizer model))
@@ -602,5 +670,5 @@ attempts-used)."
                      (return-from write-lisp (values (car winner) t (cdr winner) attempt)))
                    (setf code first-code result first-result
                          messages (append messages (list (cons "assistant" code)
-                                                         (cons "user" (feedback result))))))))
+                                                         (cons "user" (feedback result :diagnostics diagnostics))))))))
       (values code nil result attempts))))

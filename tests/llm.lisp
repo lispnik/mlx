@@ -747,3 +747,22 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
           (llm:generate-tokens-speculative target draft prompt (lambda (id) (push id ids))
                                            :max-tokens 20 :eos-ids (list stop))
           (is (equal (subseq expected 0 (position stop expected)) (reverse ids))))))))
+
+(test evaluator-diagnostics
+  (dolist (isolation '(:process :in-process))
+    ;; a wrong result: the calls the failing test made, and their results
+    (let ((wrong (llm:evaluate-lisp "(defun fact (n) (if (< n 2) 1 (* n (fact (- n 2)))))"
+                                    :tests '("(= (fact 4) 24)") :isolation isolation)))
+      (is (equal '("(FACT 4)" "  (FACT 2)" "    (FACT 0)" "    => 1" "  => 2" "=> 8") (getf wrong :calls)))
+      (is (search "=> 8" (mlx.llm::feedback wrong)))
+      (is (not (search "=> 8" (mlx.llm::feedback wrong :diagnostics nil)))))
+    ;; an error: the calls in progress, innermost first
+    (let ((broken (llm:evaluate-lisp "(defun head (x) (car x)) (defun heads (xs) (mapcar #'head xs))"
+                                     :tests '("(equal (heads '((1) 2)) '(1 2))") :isolation isolation)))
+      (is (search "TYPE-ERROR" (getf broken :error)))
+      (is (equal "(HEAD 2)" (first (getf broken :backtrace))))
+      (is (search "Calls in progress" (mlx.llm::feedback broken))))
+    ;; the tracing leaves the functions as they were
+    (let ((r (llm:evaluate-lisp "(defun sq (x) (* x x))"
+                                :tests '("(= (sq 3) 10)" "(eq (fdefinition 'sq) (fdefinition 'sq))") :isolation isolation)))
+      (is (equal '("(SQ 3)" "=> 9") (getf r :calls))))))

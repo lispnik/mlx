@@ -22,9 +22,11 @@
   '((:plain "plain reply, 1 try" :constrained nil :repair-parens nil :attempts 1)
     (:reader "reader-constrained" :repair-parens nil :attempts 1)
     (:parens "+ parens from indentation" :attempts 1)
+    (:loop-bare "+ repair loop, errors and failures only" :attempts 4 :diagnostics nil)
     (:loop "+ repair loop (4 attempts)" :attempts 4)
     (:best-of-4 "+ 4 candidates per attempt" :attempts 4 :candidates 4))
-  "(key description write-lisp-arguments...), each adding one technique.")
+  "(key description write-lisp-arguments...), each adding one technique.
+:LOOP-BARE is :LOOP without the call traces in its feedback.")
 
 (defun project-file (name) (asdf:system-relative-pathname "mlx" name))
 
@@ -32,9 +34,10 @@
   (with-open-file (in (project-file "bench/lisp-tasks.sexp"))
     (let ((*read-eval* nil)) (read in))))
 
-(defun run (&key (model "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
-                 (configs (mapcar #'first *configs*)) tasks (seed 0))
-  (let* ((lm (llm:load-model model))
+(defun run (&key (model "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit") adapters
+                 (configs (remove :loop-bare (mapcar #'first *configs*))) tasks (seed 0))
+  "Run the benchmark with MODEL, plus ADAPTERS (from LLM:SAVE-ADAPTERS) if given."
+  (let* ((lm (let ((lm (llm:load-model model))) (if adapters (llm:load-adapters lm adapters) lm)))
          (all (load-tasks))
          (tasks (if tasks (remove-if-not (lambda (tk) (member (getf tk :name) tasks :test #'string=)) all) all))
          (table '()))
@@ -58,12 +61,13 @@
                                                                           :if-exists :append :if-does-not-exist :create)
                     (with-standard-io-syntax
                       (let ((*print-readably* nil))
-                        (print (list :model model :config key :task (getf task :name) :ok ok
+                        (print (list :model model :adapters (and adapters (namestring adapters))
+                                     :config key :task (getf task :name) :ok ok
                                      :attempts used :seconds (float time))
                                out))))))))
           (push (list description passed (length tasks) seconds) table)
           (format t "~&  ~D/~D passed, ~,1Fs in all~%" passed (length tasks) seconds))))
-    (format t "~&~%~A~%~40A ~8A ~10A~%" model "configuration" "passed" "time")
+    (format t "~&~%~A~@[ + ~A~]~%~40A ~8A ~10A~%" model adapters "configuration" "passed" "time")
     (loop for (description passed total seconds) in (reverse table)
           do (format t "~40A ~3D/~2D ~8,1Fs~%" description passed total seconds))
     (reverse table)))

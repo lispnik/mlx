@@ -126,6 +126,7 @@ losses and initializers.")
    #:sequential #:identity #:prelu #:multi-head-attention #:create-additive-causal-mask
    #:rope #:quantized-linear #:quantized-embedding #:quantize
    #:switch-linear #:quantized-switch-linear #:switch-glu #:swiglu
+   #:lora-linear #:linear-to-lora-layers
    ;; networks with compile-time shape checking
    #:defnet #:shape-error #:net-summary
    ;; activations

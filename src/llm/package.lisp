@@ -2,7 +2,7 @@
 
 (defpackage :mlx.llm
   (:use :cl)
-  (:local-nicknames (:mx :mlx) (:nn :mlx.nn) (:random :mlx.random) (:fast :mlx.fast))
+  (:local-nicknames (:mx :mlx) (:nn :mlx.nn) (:optim :mlx.optimizers) (:random :mlx.random) (:fast :mlx.fast))
   (:documentation "Language models on MLX: Hugging Face BPE tokenizers (byte-level
 and SentencePiece), Llama, Qwen2, Mistral, Phi-3 and Gemma 2/3 transformers
 with a KV cache, sampling and generation.")
@@ -19,4 +19,5 @@ with a KV cache, sampling and generation.")
    ;; writing Lisp
    #:generate-lisp-form #:evaluate-lisp #:write-lisp
    #:generate-batch #:generate-tokens-batch #:generate-tokens-speculative
+   #:apply-lora #:lora-train #:save-adapters #:load-adapters #:chat-example
    #:complete-lisp #:emacs-complete #:emacs-warm-up #:*completion-model-name*))

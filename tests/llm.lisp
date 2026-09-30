@@ -766,3 +766,47 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
     (let ((r (llm:evaluate-lisp "(defun sq (x) (* x x))"
                                 :tests '("(= (sq 3) 10)" "(eq (fdefinition 'sq) (fdefinition 'sq))") :isolation isolation)))
       (is (equal '("(SQ 3)" "=> 9") (getf r :calls))))))
+
+;;; ------------------------------------------------------------------
+;;; LoRA fine-tuning
+
+(test lora-layers
+  (random:seed 5)
+  (let* ((linear (nn:linear 16 8))
+         (lora (nn:lora-linear linear :rank 4))
+         (x (random:normal :shape '(3 16))))
+    ;; B starts at zero: the adapted layer is the original
+    (is (< (mx:item (mx:max (mx:abs (mx:subtract (funcall lora x) (funcall linear x))))) 1e-6))
+    ;; only the adapters train
+    (is (equal '("lora_a" "lora_b")
+               (sort (mapcar #'car (nn:flatten-parameters (nn:trainable-parameters lora))) #'string<)))
+    ;; a quantized layer can be adapted too
+    (let ((q (nn:lora-linear (nn:quantized-linear 64 32 :group-size 32) :rank 2)))
+      (is (equal '(3 32) (mx:shape (funcall q (random:normal :shape '(3 64)))))))))
+
+(test lora-training-learns-and-round-trips
+  ;; teach a tiny model a fixed reply; the adapters alone carry what it learned
+  (random:seed 6)
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256)))
+         (example (cons '(1 2 3 4) '(70 71 72 73 74)))
+         (tmp (uiop:tmpize-pathname (merge-pathnames "adapters.safetensors" (uiop:temporary-directory)))))
+    (setf (llm:model-tokenizer model) (byte-tokenizer))
+    (let ((losses (llm:lora-train model (list example) :iterations 200 :batch-size 2 :learning-rate 3e-3
+                                                       :rank 4 :num-layers 2 :report-every 20 :stream nil)))
+      (is (< (car (last losses)) (* 0.2 (first losses))) "losses ~S" losses))
+    (flet ((reply (m) (let ((ids '()))
+                        (llm:generate-tokens m (car example) (lambda (id) (push id ids)) :max-tokens 5)
+                        (reverse ids))))
+      (is (equal '(70 71 72 73 74) (reply model)))
+      (unwind-protect
+           (progn
+             (llm:save-adapters model tmp)
+             ;; a fresh copy of the base model with the saved adapters behaves the same
+             (random:seed 6)
+             (let ((fresh (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256))))
+               (setf (llm:model-tokenizer fresh) (byte-tokenizer))
+               (is (not (equal '(70 71 72 73 74) (reply fresh))))
+               (llm:load-adapters fresh tmp)
+               (is (equal '(70 71 72 73 74) (reply fresh)))))
+        (uiop:delete-file-if-exists tmp)
+        (uiop:delete-file-if-exists (make-pathname :type "sexp" :defaults tmp))))))

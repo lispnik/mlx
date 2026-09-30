@@ -34,6 +34,7 @@
                (:file "nn/functions")
                (:file "nn/layers")
                (:file "nn/defnet")
+               (:file "nn/lora")
                (:file "nn/optimizers"))
   :in-order-to ((test-op (test-op "mlx/tests"))))
 
@@ -65,6 +66,7 @@
                (:file "generate")
                (:file "batch")
                (:file "speculative")
+               (:file "lora")
                (:file "lisp")
                (:file "complete")))
 

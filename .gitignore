@@ -4,3 +4,5 @@ ocicl/
 demo/out/
 bench/run.log
 bench/results.sexp
+train/data.sexp
+train/adapters/

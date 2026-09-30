@@ -620,7 +620,8 @@ The feedback includes, with DIAGNOSTICS, the calls in progress at an error
 or the calls a failing test made (see FEEDBACK).  CONSTRAINED,
 REPAIR-PARENS and DIAGNOSTICS turn those techniques off, for comparison.
 Progress goes to STREAM.  Returns (values code success-p result
-attempts-used)."
+attempts-used messages): MESSAGES is the conversation the last attempt
+answered (e.g. to train on successful ones)."
   (let* ((tokenizer (model-tokenizer model))
          (sampler (make-sampler :temperature temperature))
          ;; greedy retries tend to resubmit the same code
@@ -667,8 +668,8 @@ attempts-used)."
                                 (setf winner (cons c r))
                                 (return))))
                    (when winner
-                     (return-from write-lisp (values (car winner) t (cdr winner) attempt)))
+                     (return-from write-lisp (values (car winner) t (cdr winner) attempt messages)))
                    (setf code first-code result first-result
                          messages (append messages (list (cons "assistant" code)
                                                          (cons "user" (feedback result :diagnostics diagnostics))))))))
-      (values code nil result attempts))))
+      (values code nil result attempts messages))))

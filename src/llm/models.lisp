@@ -345,11 +345,12 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
             (let* ((q (heads-first q heads :q-norm))
                    (k (heads-first k kv-heads :k-norm))
                    (v (heads-first v kv-heads))
-                   (offset (kv-cache-offset cache))
+                   (offset (if cache (kv-cache-offset cache) 0))
                    (q (funcall rotary q offset))
                    (k (funcall rotary k offset)))
-              (multiple-value-bind (keys values) (cache-update cache k v)
-                (let* ((padding (kv-cache-padding cache))
+              ;; without a cache (training), attention covers just this input
+              (multiple-value-bind (keys values) (if cache (cache-update cache k v) (values k v))
+                (let* ((padding (and cache (kv-cache-padding cache)))
                        (out
                         (cond
                           (padding
@@ -510,7 +511,8 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
 (nn:defmodule causal-lm ()
   ((config :initarg :config :reader model-config)
    (arch :initarg :arch :reader model-arch)
-   (tokenizer :initarg :tokenizer :initform nil :accessor model-tokenizer)))
+   (tokenizer :initarg :tokenizer :initform nil :accessor model-tokenizer)
+   (lora :initform nil :accessor model-lora)))    ; plist: :config of APPLY-LORA
 
 (defun make-causal-lm (config &key (tied (config-get config "tie_word_embeddings" nil)))
   "An untrained model for the parsed config.json CONFIG."
@@ -529,7 +531,8 @@ kernel has no soft-capping) exactly as mlx-lm's Gemma 2 does."
 
 (defmethod nn:forward ((m causal-lm) &rest args)
   "(funcall model tokens cache): TOKENS is a (B L) int array; returns
-logits (B L vocab) and advances CACHE."
+logits (B L vocab) and advances CACHE.  With CACHE NIL (for training),
+the tokens are a whole sequence attended causally."
   (destructuring-bind (tokens cache) args
     (let* ((arch (model-arch m))
            (decoder (nn:child m :model))
@@ -541,8 +544,8 @@ logits (B L vocab) and advances CACHE."
                 (:bf16 (mx:multiply h (mx:astype (mx:scalar scale :dtype :bfloat16) (mx:dtype h))))
                 (t (mx:multiply h scale)))))
       (loop for layer in (nn:child decoder :layers)
-            for c in cache
-            do (setf h (funcall layer h c)))
+            for rest = cache then (rest rest)   ; CACHE may be NIL: no cache
+            do (setf h (funcall layer h (first rest))))
       (setf h (funcall (nn:child decoder :norm) h))
       (let ((logits (if (nn:child m :lm-head)
                         (funcall (nn:child m :lm-head) h)

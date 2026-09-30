@@ -378,6 +378,29 @@ To get there, the generation loop:
   bf16 rounding;
 - keeps a chunked, preallocated KV cache.
 
+### Batched generation
+
+`generate-batch` runs several prompts as one batch, and `mlx-cl generate -N 4`
+samples four replies at once. Prompts are left-padded to a common length.
+The cache records each row's padding, and attention never looks at it.
+RoPE depends only on relative positions, so this is exact: on float32
+models, batched greedy output equals one-at-a-time output, sliding windows
+included. (In bf16 a row can occasionally diverge at a near-tie.)
+
+A decoding step is bound by reading the weights, so extra rows are nearly
+free. For Qwen2.5-Coder-7B (4-bit) on an M3:
+
+| rows | tokens/s (all rows) | peak memory |
+| ---: | ---: | ---: |
+| 1 | 21 | 4.5 GB |
+| 4 | 69 | 5.2 GB |
+| 8 | 71 | 6.0 GB |
+| 16 | 74 | 7.7 GB |
+
+The Lisp writer uses this for best-of-N: `write-lisp :candidates 4`
+(`mlx-cl lisp -n 4`) decodes four reader-constrained forms per attempt,
+each with its own lexer, and keeps the first that passes the tests.
+
 ### Writing Lisp
 
 `write-lisp` asks a model for code, runs it with tests, and feeds any
@@ -422,6 +445,24 @@ It uses Lisp's structure at every step:
 `generate-lisp-form` (constrained decoding alone) and `evaluate-lisp` are
 also exported. Binding `mlx.llm::*constraint-trace*` to a stream reports
 each token where the constraint overrode the model.
+
+**Measured.** `bench/lisp-writer.lisp` runs 40 exercises
+(`bench/lisp-tasks.sexp`: lists, strings, recursion, hash tables, macros,
+CLOS, conditions) with tests, adding one technique at a time.
+Qwen2.5-Coder-7B (4-bit) on an M3:
+
+| configuration | passed | time |
+| --- | ---: | ---: |
+| plain reply, one try | 19/40 | 296 s |
+| + reader-constrained decoding | 19/40 | 449 s |
+| + parens re-derived from indentation | 19/40 | 453 s |
+| + repair loop (4 attempts) | 24/40 | 3448 s |
+
+For this model, the reader constraint and paren repair change nothing:
+it rarely writes malformed Lisp. They mattered for the 3B model, whose
+paren counting fails often. The gain comes from running the code and
+feeding the failures back. Best-of-4 candidates (`:candidates 4`) has
+not finished a full run yet; the run was interrupted by memory pressure.
 
 Qwen2.5-Coder-7B (4-bit, 4.5 GB peak, about 18 tokens/s on an M3) solves
 typical exercises in one or two attempts, such as:

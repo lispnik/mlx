@@ -128,3 +128,51 @@
       ;; and the formula found is a real Lisp function
       (let ((f (sr:expression-function (sr:candidate-expression best) *vars*)))
         (is (close-p (+ 4.0 (* 2.5 (sin 1.0))) (funcall f 2.0 1.0) 1e-3))))))
+
+;;; Units and several targets
+
+(test units
+  (is (equal '((:kg . 1) (:m . 1) (:s . -2)) (sr:parse-unit "kg*m/s^2")))
+  (is (equal (sr:parse-unit "kg*m/s^2") (sr:parse-unit '(kg m (s -2)))))
+  (is (null (sr:parse-unit "1")))
+  (is (equal '((:m . 1/2)) (sr:parse-unit "m^(1/2)")))
+  (is (equal '((:m . 1/2) (:s . -1)) (sr:parse-unit "m^(1/2)/s")))
+  (is (string= "kg*m*s^-2" (sr:unit-string (sr:parse-unit "kg*m/s^2"))))
+  (let ((units (list (cons 'x0 (sr:parse-unit "kg")) (cons 'x1 (sr:parse-unit "m")))))
+    (flet ((u (e) (sr:expression-units e units)))
+      (is (equal '((:kg . 1) (:m . -2)) (u '(/ x0 (square x1)))))
+      (is (eq :invalid (u '(+ x0 x1))) "kilograms plus metres")
+      (is (eq :invalid (u '(sin x0))) "the sine of a mass")
+      (is (null (u '(sin (/ x1 x1)))))
+      ;; a constant can carry any unit
+      (is (equal '((:m . 1)) (u '(+ (* 2.0 x0) x1))))
+      (is (eq :any (u '(* 3.0 x0))))
+      (is (equal '((:m . 1/2)) (u '(sqrt x1)))))))
+
+(test units-constrain-the-search
+  (let* ((xs (samples 200 :seed 5 :low 0.5 :high 3.0))
+         (ys (mapcar (lambda (r) (/ (* 6.674 (first r)) (square (second r)))) xs)))
+    (multiple-value-bind (best front)
+        (sr:symbolic-regression xs ys :variables *vars* :units '("kg" "m") :target-units "kg/m^2"
+                                      :scaling nil :seed 3 :population 300 :generations 40 :stream nil)
+      (is (< (sr:candidate-loss best) 1e-6) "best: ~S" best)
+      ;; everything on the front is dimensionally consistent, with the target's unit
+      (dolist (c front)
+        (let ((u (sr:expression-units (sr:candidate-expression c)
+                                      (list (cons 'x0 (sr:parse-unit "kg")) (cons 'x1 (sr:parse-unit "m"))))))
+          (is (or (eq u :any) (equal u (sr:parse-unit "kg/m^2"))) "~S has unit ~S" c u))))))
+
+(test several-targets-at-once
+  (let* ((xs (samples 200 :seed 6))
+         (ys (mapcar (lambda (r) (list (+ (square (first r)) (second r))
+                                       (* 3.0 (sin (second r)))))
+                     xs)))
+    (multiple-value-bind (bests fronts)
+        (sr:symbolic-regression xs ys :variables *vars* :seed 2 :population 300 :generations 40 :stream nil)
+      (is (= 2 (length bests)))
+      (is (= 2 (length fronts)))
+      (is (< (sr:candidate-loss (first bests)) 1e-8) "first: ~S" (first bests))
+      (is (< (sr:candidate-loss (second bests)) 1e-8) "second: ~S" (second bests))
+      ;; each fits its own target
+      (let ((f (sr:expression-function (sr:candidate-expression (second bests)) *vars*)))
+        (is (close-p (* 3.0 (sin 1.0)) (funcall f 0.7 1.0) 1e-3))))))

@@ -63,6 +63,7 @@
                (:file "models")
                (:file "hub")
                (:file "generate")
+               (:file "batch")
                (:file "lisp")
                (:file "complete")))
 

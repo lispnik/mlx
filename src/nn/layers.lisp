@@ -215,6 +215,57 @@ frozen children, updated in training mode and used in evaluation mode."
                           :groups groups)))
         (if (nn:child m "bias") (mx:add y (nn:child m "bias")) y)))))
 
+;;; Transposed convolution (channels last), as mlx.nn.ConvTranspose1d/2d
+
+(nn:defmodule nn:conv-transpose1d ()
+  ((stride :initarg :stride) (padding :initarg :padding) (dilation :initarg :dilation)
+   (output-padding :initarg :output-padding)))
+
+(defun nn:conv-transpose1d (in-channels out-channels kernel-size
+                            &key (stride 1) (padding 0) (dilation 1) (output-padding 0) (bias t))
+  "Output length (L-1)*STRIDE - 2*PADDING + DILATION*(KERNEL-SIZE-1) + OUTPUT-PADDING + 1."
+  (let ((m (make-instance 'nn:conv-transpose1d :stride stride :padding padding :dilation dilation
+                                               :output-padding output-padding))
+        (scale (sqrt (/ 1.0 (* in-channels kernel-size)))))
+    (nn:register m "weight" (uniform-init (list out-channels kernel-size in-channels) scale))
+    (when bias (nn:register m "bias" (mx:zeros (list out-channels))))
+    m))
+
+(defmethod nn:forward ((m nn:conv-transpose1d) &rest args)
+  (destructuring-bind (x) args
+    (with-slots (stride padding dilation output-padding) m
+      (let ((y (mx:conv-transpose1d x (nn:child m "weight") :stride stride :padding padding
+                                                             :dilation dilation :output-padding output-padding)))
+        (if (nn:child m "bias") (mx:add y (nn:child m "bias")) y)))))
+
+(nn:defmodule nn:conv-transpose2d ()
+  ((stride :initarg :stride) (padding :initarg :padding) (dilation :initarg :dilation)
+   (output-padding :initarg :output-padding)))
+
+(defun nn:conv-transpose2d (in-channels out-channels kernel-size
+                            &key (stride 1) (padding 0) (dilation 1) (output-padding 0) (bias t))
+  "KERNEL-SIZE, STRIDE, PADDING, DILATION and OUTPUT-PADDING are integers or
+(h w) pairs.  Each output side is (N-1)*STRIDE - 2*PADDING +
+DILATION*(KERNEL-1) + OUTPUT-PADDING + 1."
+  (let* ((kernel (pair kernel-size))
+         (m (make-instance 'nn:conv-transpose2d :stride (pair stride) :padding (pair padding)
+                                                :dilation (pair dilation) :output-padding (pair output-padding)))
+         (scale (sqrt (/ 1.0 (* in-channels (first kernel) (second kernel))))))
+    (nn:register m "weight" (uniform-init (list out-channels (first kernel) (second kernel) in-channels) scale))
+    (when bias (nn:register m "bias" (mx:zeros (list out-channels))))
+    m))
+
+(defmethod nn:forward ((m nn:conv-transpose2d) &rest args)
+  (destructuring-bind (x) args
+    (with-slots (stride padding dilation output-padding) m
+      (let ((y (mx:conv-transpose2d x (nn:child m "weight")
+                                    :stride-0 (first stride) :stride-1 (second stride)
+                                    :padding-0 (first padding) :padding-1 (second padding)
+                                    :dilation-0 (first dilation) :dilation-1 (second dilation)
+                                    :output-padding-0 (first output-padding)
+                                    :output-padding-1 (second output-padding))))
+        (if (nn:child m "bias") (mx:add y (nn:child m "bias")) y)))))
+
 ;;; Pooling: sliding windows via as-strided, then a reduction over them
 
 (defun sliding-windows (x window strides)

@@ -122,6 +122,88 @@ floats, with the protected operators)."
         (t (cons (first e) (mapcar (lambda (x) (round-constants x digits)) (rest e))))))
 
 ;;; ------------------------------------------------------------------
+;;; Physical units
+;;;
+;;; A unit is an alist of (base . exponent), sorted, e.g. ((:KG . 1)
+;;; (:M . 1) (:S . -2)); NIL is dimensionless.  Written as a string
+;;; "kg*m/s^2" or a list (kg m (s -2)).  Units rule out formulas that add
+;;; metres to kilograms or take the sine of a mass.  As in PySR, a
+;;; constant may carry any unit (:ANY), so (* 2.0 mass) can be added to
+;;; a length: the constant is a length per mass.
+
+(defun normalize-unit (alist)
+  (let ((table '()))
+    (loop for (base . exponent) in alist
+          do (let ((cell (assoc base table)))
+               (if cell (incf (cdr cell) exponent) (push (cons base exponent) table))))
+    (sort (remove-if #'zerop table :key #'cdr) #'string< :key (lambda (c) (symbol-name (car c))))))
+
+(defun parse-unit (unit)
+  "UNIT (a string such as \"kg*m/s^2\" or \"m^(1/2)\", \"1\" or \"\", or a
+list such as (kg m (s -2))) as a normalized alist."
+  (flet ((base (name) (intern (string-upcase (string-trim " " (string name))) :keyword)))
+    (etypecase unit
+      (null nil)
+      (cons (normalize-unit (mapcar (lambda (u) (if (consp u) (cons (base (first u)) (rational (second u)))
+                                                   (cons (base u) 1)))
+                                    unit)))
+      (string
+       (let* ((slash (let ((depth 0))    ; the division, not a slash in "m^(1/2)"
+                       (position-if (lambda (c) (case c
+                                                  (#\( (incf depth) nil)
+                                                  (#\) (decf depth) nil)
+                                                  (#\/ (zerop depth))))
+                                    unit)))
+              (parts (list (cons (subseq unit 0 (or slash (length unit))) 1)
+                           (and slash (cons (subseq unit (1+ slash)) -1)))))
+         (normalize-unit
+          (loop for (text . sign) in (remove nil parts)
+                nconc (loop for factor in (uiop:split-string text :separator "*")
+                            for trimmed = (string-trim " " factor)
+                            for caret = (position #\^ trimmed)
+                            for name = (subseq trimmed 0 (or caret (length trimmed)))
+                            unless (or (string= name "") (string= name "1"))
+                              collect (cons (base name)
+                                            (* sign (if caret
+                                                        (let ((*read-eval* nil))
+                                                          (rational (read-from-string
+                                                                     (string-trim "()" (subseq trimmed (1+ caret))))))
+                                                        1))))))))
+      (symbol (parse-unit (list unit))))))
+
+(defun unit-string (unit)
+  (if (null unit)
+      "1"
+      (format nil "~{~A~^*~}"
+              (loop for (base . exponent) in unit
+                    collect (if (= exponent 1)
+                                (string-downcase base)
+                                (format nil "~(~A~)^~A" base exponent))))))
+
+(defun expression-units (e units)
+  "The unit of expression E given UNITS, an alist from variable to unit:
+a unit, :ANY (it has a free constant factor) or :INVALID."
+  (labels ((unit (e)
+             (cond ((numberp e) :any)
+                   ((symbolp e) (let ((cell (assoc e units))) (if cell (cdr cell) nil)))
+                   (t (let ((args (mapcar #'unit (rest e))))
+                        (if (member :invalid args)
+                            :invalid
+                            (combine (first e) args))))))
+           (scale (u k) (if (eq u :any) :any (normalize-unit (mapcar (lambda (c) (cons (car c) (* k (cdr c)))) u))))
+           (combine (op args)
+             (destructuring-bind (a &optional b) args
+               (case op
+                 ((+ -) (cond ((eq a :any) b) ((eq b :any) a) ((equal a b) a) (t :invalid)))
+                 (* (if (or (eq a :any) (eq b :any)) :any (normalize-unit (append a b))))
+                 (/ (if (or (eq a :any) (eq b :any)) :any (normalize-unit (append a (scale b -1)))))
+                 (square (scale a 2))
+                 (sqrt (scale a 1/2))
+                 ;; transcendental functions need a dimensionless argument
+                 (t (if (or (eq a :any) (null a)) nil :invalid))))))
+    (unit e)))
+
+;;; ------------------------------------------------------------------
 ;;; The stack machine
 ;;;
 ;;; A program is a row of instructions: 0 no-op, 1 push constant, 2..V+1
@@ -215,7 +297,7 @@ spares evolution from having to find a formula's outer constants."
       (if (not (machine-scaling machine))
           (list (mse f) (mx:zeros (list (mx:dim f 0))) (mx:ones (list (mx:dim f 0))))
           (let* ((f-mean (mx:mean f :axis 1 :keepdims t))
-                 (y-mean (mx:mean y))
+                 (y-mean (mx:mean y :axis 1 :keepdims t))  ; per row: rows may fit different targets
                  (df (mx:subtract f f-mean))
                  (var (mx:mean (mx:square df) :axis 1 :keepdims t))
                  (flat (mx:less var 1f-12))
@@ -388,7 +470,22 @@ beats a loss at or below TARGET-LOSS: rounding noise is not progress."
           when (and (> best target-loss) (< (candidate-loss c) (* 0.95 best)))
             collect (progn (setf best (candidate-loss c)) c))))
 
+(defun target-columns (y n)
+  "Y as a list of target vectors of single floats: Y is a sequence of N
+numbers (one target), or of N rows, or an N x K array (K targets)."
+  (let ((rows (if (and (arrayp y) (= (array-rank y) 2))
+                  (loop for i below (array-dimension y 0)
+                        collect (loop for j below (array-dimension y 1) collect (aref y i j)))
+                  (map 'list #'identity y))))
+    (unless (= n (length rows))
+      (error "X has ~D samples but Y has ~D." n (length rows)))
+    (if (numberp (first rows))
+        (list (map 'vector (lambda (v) (float v 1f0)) rows))
+        (loop for k below (length (first rows))
+              collect (map 'vector (lambda (row) (float (elt row k) 1f0)) rows)))))
+
 (defun symbolic-regression (x y &key variables (operators *default-operators*)
+                                     units target-units
                                      (population 1000) (generations 100)
                                      (max-size 30) (stack-size 10)
                                      (tuning-steps 8) (learning-rate 0.1)
@@ -396,84 +493,132 @@ beats a loss at or below TARGET-LOSS: rounding noise is not progress."
                                      (scaling t) (max-samples 1024)
                                      (target-loss 1e-9) (patience 10) time-limit
                                      seed (stream *standard-output*))
-  "Search for a formula in VARIABLES (default X0, X1, ...) fitting Y (a
-sequence of targets) given X (samples by variables: a 2D array, a sequence
-of rows, or a vector for one variable).
+  "Search for a formula in VARIABLES (default X0, X1, ...) fitting Y given
+X (samples by variables: a 2D array, a sequence of rows, or a vector for
+one variable).  Y is a sequence of targets, or of rows (or an N x K array)
+for K targets, which are fitted at once in one GPU batch.
 
-Each generation breeds POPULATION expressions of at most MAX-SIZE nodes
-from OPERATORS (see OPERATOR-NAMES), tunes all their constants on the GPU
-with TUNING-STEPS of Adam, and selects by tournament on normalized mean
-squared error (MSE / variance of Y) plus PARSIMONY per node.  At most
-MAX-SAMPLES samples (a random subset) are used.  With SCALING, each
-candidate f is judged as a + b f with the best offset and scale, found in
-closed form.  Stops after GENERATIONS or TIME-LIMIT seconds, or PATIENCE
-generations after the loss first reaches TARGET-LOSS.
+Each generation breeds POPULATION expressions (per target) of at most
+MAX-SIZE nodes from OPERATORS (see OPERATOR-NAMES), tunes all their
+constants on the GPU with TUNING-STEPS of Adam, and selects by tournament
+on normalized mean squared error (MSE / variance of the target) plus
+PARSIMONY per node.  At most MAX-SAMPLES samples (a random subset) are
+used.  With SCALING, each candidate f is judged as a + b f with the best
+offset and scale, found in closed form.  Stops after GENERATIONS or
+TIME-LIMIT seconds, or PATIENCE generations after every target's loss
+first reaches TARGET-LOSS.
+
+UNITS gives the variables' physical units, a list parallel to VARIABLES
+(each as PARSE-UNIT reads it, NIL for dimensionless): only dimensionally
+consistent formulas are bred.  Without SCALING, the formula's unit must
+also be TARGET-UNITS (one unit, or a list with one per target).
 
 Returns (values best front): FRONT lists, by size, the candidates that fit
 better than every smaller one (a Pareto front of size against loss); BEST
-is the one with the lowest loss plus PARSIMONY per node."
+is the one with the lowest loss plus PARSIMONY per node.  With several
+targets, both values are lists, one element per target."
   (let* ((*random-state* (if seed (sb-ext:seed-random-state seed) (make-random-state t)))
-         (operators (mapcar #'find-operator operators))
-         (ys (map 'vector (lambda (v) (float v 1f0)) y)))
+         (operators (mapcar #'find-operator operators)))
     (multiple-value-bind (xs n v) (data-matrix x)
-      (unless (= n (length ys))
-        (error "X has ~D samples but Y has ~D." n (length ys)))
-      (when (> n max-samples)           ; a fixed random subset
-        (let* ((keep (subseq (shuffle (loop for i below n collect i)) 0 max-samples))
-               (sub (make-array (list v max-samples) :element-type 'single-float)))
-          (loop for i in keep for k from 0
-                do (dotimes (j v) (setf (aref sub j k) (aref xs j i))))
-          (setf xs sub
-                ys (map 'vector (lambda (i) (aref ys i)) keep)
-                n max-samples)))
-      (let* ((variables (or variables (default-variables v)))
-             (variance (let ((mean (/ (reduce #'+ ys) n)))
-                         (max 1f-12 (/ (reduce #'+ ys :key (lambda (a) (expt (- a mean) 2))) n))))
-             (machine (%make-machine :variables variables :operators operators
-                                     :length max-size :stack-size stack-size :scaling scaling))
-             (tuner (make-tuner machine learning-rate))
-             (fit (mx:compile (lambda (codes consts depths slots x y)
-                                (machine-fit machine codes consts depths slots x y))))
-             (solved 0)
-             (hall (make-hash-table))
-             (start (get-internal-real-time))
-             (x-array (mx:persist (mx:from-lisp xs)))
-             (y-array (mx:persist (mx:reshape (mx:from-lisp ys) (list 1 n)))))
-        (flet ((valid-p (e) (and (<= (expression-size e) max-size) (<= (stack-need e) stack-size)))
-               (score (c) (+ (candidate-loss c) (* parsimony (candidate-size c)))))
-          (let ((pop (loop for i below population
-                           collect (loop for e = (random-expression (+ 1 (mod i 4)) (evenp i) variables operators)
-                                         when (valid-p e) return e))))
-            (unwind-protect
-                 (loop for generation from 1 to generations
-                       do (let ((candidates (tune-and-score pop machine tuner fit tuning-steps
-                                                            x-array y-array variance)))
-                            (dolist (c candidates)
-                              (let ((old (gethash (candidate-size c) hall)))
-                                (when (or (null old) (< (candidate-loss c) (candidate-loss old)))
-                                  (setf (gethash (candidate-size c) hall) c))))
-                            (let ((best (reduce (lambda (a b) (if (<= (score a) (score b)) a b)) candidates)))
+      (let ((targets (target-columns y n)))
+        (when (> n max-samples)           ; a fixed random subset
+          (let* ((keep (subseq (shuffle (loop for i below n collect i)) 0 max-samples))
+                 (sub (make-array (list v max-samples) :element-type 'single-float)))
+            (loop for i in keep for k from 0
+                  do (dotimes (j v) (setf (aref sub j k) (aref xs j i))))
+            (setf xs sub
+                  targets (mapcar (lambda (ys) (map 'vector (lambda (i) (aref ys i)) keep)) targets)
+                  n max-samples)))
+        (let* ((k (length targets))
+               (variables (or variables (default-variables v)))
+               (unit-alist (and units (mapcar (lambda (var u) (cons var (parse-unit u))) variables units)))
+               (target-unit-list (cond ((null target-units) (make-list k))
+                                       ((and (> k 1) (listp target-units) (= (length target-units) k)
+                                             (not (and (consp (first target-units)) (numberp (second (first target-units))))))
+                                        (mapcar #'parse-unit target-units))
+                                       (t (make-list k :initial-element (parse-unit target-units)))))
+               (variances (mapcar (lambda (ys)
+                                    (let ((mean (/ (reduce #'+ ys) n)))
+                                      (max 1f-12 (/ (reduce #'+ ys :key (lambda (a) (expt (- a mean) 2))) n))))
+                                  targets))
+               (row-variances (coerce (loop for variance in variances
+                                            nconc (make-list population :initial-element variance))
+                                      'vector))
+               (machine (%make-machine :variables variables :operators operators
+                                       :length max-size :stack-size stack-size :scaling scaling))
+               (tuner (make-tuner machine learning-rate))
+               (fit (mx:compile (lambda (codes consts depths slots x y)
+                                  (machine-fit machine codes consts depths slots x y))))
+               (solved (make-list k :initial-element 0))
+               (halls (loop repeat k collect (make-hash-table)))
+               (start (get-internal-real-time))
+               (x-array (mx:persist (mx:from-lisp xs)))
+               ;; every program's own target row: (K*POPULATION N)
+               (y-array (mx:persist
+                         (mx:with-scope ()
+                           (mx:keep (mx:take (mx:from-lisp (mapcar (lambda (ys) (coerce ys 'list)) targets))
+                                             (mx:from-lisp (loop for g below k nconc (make-list population :initial-element g))
+                                                           :dtype :int32)
+                                             :axis 0))))))
+          (labels ((valid-p (e target-unit)
+                     (and (<= (expression-size e) max-size) (<= (stack-need e) stack-size)
+                          (or (null unit-alist)
+                              (let ((u (expression-units e unit-alist)))
+                                (and (not (eq u :invalid))
+                                     (or scaling (eq u :any) (equal u target-unit)))))))
+                   (score (c) (+ (candidate-loss c) (* parsimony (candidate-size c))))
+                   (best-of (candidates) (reduce (lambda (a b) (if (<= (score a) (score b)) a b)) candidates))
+                   (initial (target-unit)
+                     (loop for i below population
+                           collect (or (loop repeat 1000
+                                             for e = (random-expression (+ 1 (mod i 4)) (evenp i) variables operators)
+                                             when (valid-p e target-unit) return e)
+                                       (or (find-if (lambda (var) (valid-p var target-unit)) variables)
+                                           1.0)))))
+            (let ((pops (mapcar #'initial target-unit-list)))
+              (unwind-protect
+                   (loop for generation from 1 to generations
+                         do (let* ((all (tune-and-score (reduce #'append pops) machine tuner fit tuning-steps
+                                                        x-array y-array row-variances))
+                                   (groups (loop for g below k
+                                                 collect (subseq all (* g population) (* (1+ g) population))))
+                                   (bests (mapcar #'best-of groups)))
+                              (loop for candidates in groups for hall in halls
+                                    do (dolist (c candidates)
+                                         (let ((old (gethash (candidate-size c) hall)))
+                                           (when (or (null old) (< (candidate-loss c) (candidate-loss old)))
+                                             (setf (gethash (candidate-size c) hall) c)))))
                               (when stream
-                                (format-expression-line stream "~&gen ~3D  loss ~10,3,,,,,'EG  size ~2D  ~,1Fs  ~S~%"
-                                        generation (candidate-loss best) (candidate-size best)
-                                        (/ (- (get-internal-real-time) start) internal-time-units-per-second)
-                                        (round-constants (candidate-expression best) 4))
+                                (let ((seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+                                  (if (= k 1)
+                                      (format-expression-line stream "~&gen ~3D  loss ~10,3,,,,,'EG  size ~2D  ~,1Fs  ~S~%"
+                                                              generation (candidate-loss (first bests))
+                                                              (candidate-size (first bests)) seconds
+                                                              (round-constants (candidate-expression (first bests)) 4))
+                                      (format-expression-line stream "~&gen ~3D  ~,1Fs~{  ~10,3,,,,,'EG~}~%"
+                                                              generation seconds (mapcar #'candidate-loss bests))))
                                 (force-output stream))
-                              ;; once solved, a few more generations let parsimony
-                              ;; find a smaller form
-                              (when (<= (candidate-loss best) target-loss) (incf solved))
-                              (when (or (> solved patience) (= generation generations)
+                              ;; once solved, a few more generations let parsimony find a
+                              ;; smaller form
+                              (setf solved (loop for b in bests for count in solved
+                                                 collect (if (<= (candidate-loss b) target-loss) (1+ count) count)))
+                              (when (or (every (lambda (count) (> count patience)) solved)
+                                        (= generation generations)
                                         (and time-limit
                                              (> (- (get-internal-real-time) start)
                                                 (* time-limit internal-time-units-per-second))))
-                                (loop-finish)))
-                            (setf pop (next-generation candidates population elites tournament
-                                                       #'score #'valid-p variables operators))))
-              (mx:free x-array)
-              (mx:free y-array))
-            (let ((front (pareto-front hall target-loss)))
-              (values (reduce (lambda (a b) (if (<= (score a) (score b)) a b)) front)
-                      front))))))))
+                                (loop-finish))
+                              (setf pops (loop for candidates in groups for target-unit in target-unit-list
+                                               collect (next-generation candidates population elites tournament
+                                                                        #'score (lambda (e) (valid-p e target-unit))
+                                                                        variables operators)))))
+                (mx:free x-array)
+                (mx:free y-array))
+              (let* ((fronts (mapcar (lambda (hall) (pareto-front hall target-loss)) halls))
+                     (bests (mapcar #'best-of fronts)))
+                (if (= k 1)
+                    (values (first bests) (first fronts))
+                    (values bests fronts))))))))))
 
 (defun format-expression-line (stream control &rest args)
   (let ((*print-pretty* nil) (*print-case* :downcase) (*package* (find-package :mlx.symreg)))
@@ -485,9 +630,10 @@ is the one with the lowest loss plus PARSIMONY per node."
           do (rotatef (aref v i) (aref v (random (1+ i)))))
     (coerce v 'list)))
 
-(defun tune-and-score (expressions machine tuner fit steps x y variance)
+(defun tune-and-score (expressions machine tuner fit steps x y variances)
   "Tune the constants of all EXPRESSIONS together; candidates with the
-tuned constants (and linear scaling) and their normalized losses."
+tuned constants (and linear scaling) and their losses, normalized by
+VARIANCES (a number, or one per expression: the variance of its target)."
   (mx:with-scope ()
     (multiple-value-bind (codes consts depths slots) (encode-population machine expressions)
       (let* ((p (length expressions))
@@ -504,6 +650,7 @@ tuned constants (and linear scaling) and their normalized losses."
         (destructuring-bind (losses a b) (mapcar #'mx:to-lisp (funcall fit codes best depths slots x y))
           (let ((consts (mx:to-lisp best)))
             (loop for e in expressions for row from 0
+                  for variance = (if (numberp variances) variances (elt variances row))
                   collect (let* ((genome (write-back-constants e row consts))
                                  (model (simplify-expression
                                          (scaled-expression genome (aref a row) (aref b row) variance))))
@@ -528,7 +675,10 @@ tuned constants (and linear scaling) and their normalized losses."
                                  (crossover parent (candidate-genome (pick)))
                                  (mutate parent variables operators))))
                  (when (funcall valid-p child) (add child))))
-      (loop while (< (length next) population)
-            do (let ((e (random-expression 3 nil variables operators)))
+      (loop for tries from 0
+            while (< (length next) population)
+            do (let ((e (if (< tries (* 100 population))
+                            (random-expression 3 nil variables operators)
+                            (random-constant))))    ; a constant always fits
                  (when (funcall valid-p e) (push e next))))
       (nreverse next))))

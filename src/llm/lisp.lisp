@@ -191,53 +191,77 @@ or comment, then close every open paren."
   "A stream, or NIL.  GENERATE-LISP-FORM reports there each token where the
 reader constraint overrode the model's own choice.")
 
-(defun generate-lisp-form (model prompt-ids &key (max-tokens 512) (sampler (make-sampler)))
-  "Generate one Common Lisp form after PROMPT-IDS, decoding under the reader
-constraint.  When the model tries to end its reply (its unconstrained choice
-is a special token such as end-of-turn) with parens still open -- it lost
-count -- the form is closed for it.  Returns (values text complete-p
-closing): COMPLETE-P is false if MAX-TOKENS ran out first; CLOSING is the
-text added to close the form, or NIL."
+(defun generate-lisp-forms (model prompt-ids &key (count 1) (max-tokens 512) (sampler (make-sampler))
+                                                (temperature 0.8))
+  "Generate COUNT Common Lisp forms after PROMPT-IDS at once, as one batch,
+each decoded under the reader constraint with its own lexer.  The first
+uses SAMPLER (greedy by default); the others sample at TEMPERATURE, for
+variety.  When a row's model tries to end its reply (its unconstrained
+choice is a special token such as end-of-turn) with parens still open --
+it lost count -- its form is closed for it.  Returns a list of (text
+complete-p closing): COMPLETE-P is false if MAX-TOKENS ran out first;
+CLOSING is the text added to close the form, or NIL."
   (let* ((tokenizer (model-tokenizer model))
          (constraint (tokenizer-constraint tokenizer))
          (special (added-token-ids tokenizer))
-         (lexer (make-lisp-lexer))
+         (eos (eos-tokens tokenizer))
+         (lexers (loop repeat count collect (make-lisp-lexer)))
+         (ids (make-array count :initial-element '()))
+         (closing (make-array count :initial-element nil))
+         (done (make-array count :initial-element nil))
+         (others (make-sampler :temperature temperature))
          (cache (make-cache model))
-         (vocab nil)
-         (ids '())
-         (closing nil))
+         (vocab nil))
     ;; prefill all but the last prompt token, as GENERATE-TOKENS does
     (when (> (length prompt-ids) 1)
       (mx:with-scope ()
-        (funcall model (mx:from-lisp (list (butlast prompt-ids)) :dtype :int32) cache)
+        (funcall model (mx:from-lisp (make-list count :initial-element (butlast prompt-ids)) :dtype :int32)
+                 cache)
         (mx:eval (loop for c in cache collect (kv-cache-keys c)))))
-    (let ((input (last prompt-ids)))
+    (let ((input (make-list count :initial-element (last prompt-ids))))
       (loop repeat max-tokens
-            do (multiple-value-bind (id wants-to-stop)
+            until (every #'identity done)
+            do (multiple-value-bind (chosen unconstrained)
                    (mx:with-scope ()
-                     (let* ((logits (mx:ref (funcall model (mx:from-lisp (list input) :dtype :int32) cache)
-                                            t -1))
+                     (let* ((logits (mx:ref (funcall model (mx:from-lisp input :dtype :int32) cache) t -1))
                             (vocab* (or vocab (setf vocab (mx:dim logits -1))))
-                            (unconstrained (mx:item (mx:argmax logits :axis -1)))
-                            (chosen (mx:item (funcall sampler (mx:add logits (lisp-mask constraint lexer vocab*))))))
-                       (when (and *constraint-trace* (/= chosen unconstrained))
-                         (format *constraint-trace* "~&;; [~(~A~) depth ~D] model wanted ~S, got ~S~%"
-                                 (lisp-lexer-mode lexer) (lisp-lexer-depth lexer)
-                                 (decode tokenizer (list unconstrained)) (decode tokenizer (list chosen))))
-                       (values chosen
-                               (or (gethash unconstrained special)
-                                   (member unconstrained (eos-tokens tokenizer))))))
-                 (when (and wants-to-stop (not (eq (lisp-lexer-mode lexer) :start)))
-                   (setf closing (closing-text lexer))
-                   (return))
-                 (lex-octets lexer (svref (lisp-constraint-octets constraint) id))
-                 (push id ids)
-                 (setf input (list id))
-                 (when (lisp-form-complete-p lexer) (return)))))
-    (values (string-trim '(#\Space #\Tab #\Newline #\Return #\Page)
-                         (concatenate 'string (decode tokenizer (reverse ids)) (or closing "")))
-            (or (lisp-form-complete-p lexer) (and closing t))
-            closing)))
+                            (masked (mx:add logits (mx:stack (loop for lexer in lexers for i from 0
+                                                                   collect (if (aref done i)
+                                                                               (mx:zeros (list vocab*))
+                                                                               (lisp-mask constraint lexer vocab*))))))
+                            (first-row (funcall sampler (mx:ref masked (list 0 1))))
+                            (chosen (if (= count 1)
+                                        first-row
+                                        (mx:concatenate (list first-row (funcall others (mx:ref masked (list 1 count))))
+                                                        :axis 0))))
+                       (values (coerce (mx:to-lisp (mx:astype chosen :int32)) 'list)
+                               (coerce (mx:to-lisp (mx:argmax logits :axis -1)) 'list))))
+                 (loop for id in chosen for wanted in unconstrained for lexer in lexers for i from 0
+                       unless (aref done i)
+                         do (when (and *constraint-trace* (= i 0) (/= id wanted))
+                              (format *constraint-trace* "~&;; [~(~A~) depth ~D] model wanted ~S, got ~S~%"
+                                      (lisp-lexer-mode lexer) (lisp-lexer-depth lexer)
+                                      (decode tokenizer (list wanted)) (decode tokenizer (list id))))
+                            (cond ((and (or (gethash wanted special) (member wanted eos))
+                                        (not (eq (lisp-lexer-mode lexer) :start)))
+                                   (setf (aref closing i) (closing-text lexer)
+                                         (aref done i) t))
+                                  (t (lex-octets lexer (svref (lisp-constraint-octets constraint) id))
+                                     (push id (aref ids i))
+                                     (when (lisp-form-complete-p lexer) (setf (aref done i) t)))))
+                 (setf input (mapcar #'list chosen)))))
+    (loop for lexer in lexers for i from 0
+          collect (list (string-trim '(#\Space #\Tab #\Newline #\Return #\Page)
+                                     (concatenate 'string (decode tokenizer (reverse (aref ids i)))
+                                                  (or (aref closing i) "")))
+                        (or (lisp-form-complete-p lexer) (and (aref closing i) t))
+                        (aref closing i)))))
+
+(defun generate-lisp-form (model prompt-ids &key (max-tokens 512) (sampler (make-sampler)))
+  "Generate one Common Lisp form after PROMPT-IDS under the reader
+constraint (see GENERATE-LISP-FORMS).  Returns (values text complete-p
+closing)."
+  (values-list (first (generate-lisp-forms model prompt-ids :max-tokens max-tokens :sampler sampler))))
 
 ;;; ------------------------------------------------------------------
 ;;; Parens from indentation
@@ -498,17 +522,37 @@ the version to keep: the first that passes, else the repaired one."
                     (values code original nil)
                     (values repaired result t))))))))
 
-(defun write-lisp (model task &key tests (attempts 4) (isolation :process) (timeout 10)
+(defun unconstrained-lisp (model prompt-ids &key (max-tokens 768) (sampler (make-sampler)))
+  "The code in MODEL's free-form reply to PROMPT-IDS: the text of its first
+Markdown code block, or the whole reply.  For comparison with constrained
+decoding."
+  (let* ((tokenizer (model-tokenizer model))
+         (ids '()))
+    (generate-tokens model prompt-ids (lambda (id) (push id ids))
+                     :max-tokens max-tokens :sampler sampler :eos-ids (eos-tokens tokenizer))
+    (let* ((text (decode tokenizer (reverse ids) :skip-special t))
+           (fence (search "```" text))
+           (body-start (and fence (position #\Newline text :start fence)))
+           (body-end (and body-start (search "```" text :start2 body-start))))
+      (list (string-trim '(#\Space #\Tab #\Newline #\Return)
+                         (if body-end (subseq text (1+ body-start) body-end) text))
+            t nil))))
+
+(defun write-lisp (model task &key tests (attempts 4) (candidates 1) (isolation :process) (timeout 10)
                                    (max-tokens 768) (temperature 0.0) (retry-temperature 0.7)
+                                   (constrained t) (repair-parens t)
                                    (stream *standard-output*))
   "Ask MODEL to write Common Lisp for TASK (a string); TESTS are strings of
-forms that must return true.  Generates one reader-valid form, re-derives
-its closing parens from its indentation when the two disagree, evaluates it
-with the tests (see EVALUATE-LISP), and feeds any error, warnings or test
-failures back, up to ATTEMPTS times.  The first attempt samples at
-TEMPERATURE, later ones at RETRY-TEMPERATURE (or TEMPERATURE if higher),
-and an attempt that repeats an earlier one is sampled again.  Progress goes to STREAM.  Returns
-(values code success-p result attempts-used)."
+forms that must return true.  Each attempt generates CANDIDATES
+reader-valid forms at once (see GENERATE-LISP-FORMS: the first greedy, the
+others sampled), re-derives closing parens from indentation where the two
+disagree, and evaluates them with the tests (see EVALUATE-LISP) until one
+passes.  Otherwise the error, warnings or failures of the first go back to
+the model, up to ATTEMPTS times.  With one candidate, retries sample at
+RETRY-TEMPERATURE, and one repeating an earlier attempt is sampled again.
+CONSTRAINED and REPAIR-PARENS turn those techniques off, for comparison.
+Progress goes to STREAM.  Returns (values code success-p result
+attempts-used)."
   (let* ((tokenizer (model-tokenizer model))
          (sampler (make-sampler :temperature temperature))
          ;; greedy retries tend to resubmit the same code
@@ -516,35 +560,47 @@ and an attempt that repeats an earlier one is sampled again.  Progress goes to S
          (messages (list (cons "system" *lisp-system-prompt*)
                          (cons "user" (format nil "~A~@[~%~%It must pass these tests:~%~{~A~%~}~]" task tests))))
          (seen '()) (code nil) (result nil))
-    (loop for attempt from 1 to attempts
-          do (let ((prompt (encode tokenizer (apply-chat-template tokenizer messages :thinking nil))))
-               (multiple-value-bind (text complete closed)
-                   (generate-lisp-form model prompt :max-tokens max-tokens
-                                                   :sampler (if (= attempt 1) sampler retry-sampler))
-                 (when (member text seen :test #'string=)
-                   (multiple-value-setq (text complete closed)
-                     (generate-lisp-form model prompt :max-tokens max-tokens :sampler retry-sampler)))
-                 (push text seen)
-                 (let ((repaired nil))
-                   (if complete
-                       (multiple-value-setq (code result repaired)
-                         (check-candidates text tests timeout isolation))
-                       (setf code text
-                             result (list :ok nil :error (format nil "the form was not finished within ~D tokens"
-                                                                 max-tokens))))
-                   (when stream
-                     (format stream "~&;; attempt ~D~@[, closing ~D paren~:P the model left open~]~:[~;, parens repaired from indentation~]~%~A~%;; => ~:[~A~;ok~@[, value ~A~]~]~%"
-                             attempt (and closed (count #\) closed)) repaired
-                             code
-                             (getf result :ok)
-                             (if (getf result :ok)
-                                 (getf result :value)
-                                 (clip (substitute #\Space #\Newline
-                                                   (or (getf result :error)
-                                                       (format nil "~D failed test~:P" (length (getf result :failures)))))
-                                       200)))))
-                 (when (getf result :ok)
-                   (return-from write-lisp (values code t result attempt)))
-                 (setf messages (append messages (list (cons "assistant" code)
-                                                       (cons "user" (feedback result))))))))
-    (values code nil result attempts)))
+    (flet ((generate (prompt sampler)
+             (if constrained
+                 (generate-lisp-forms model prompt :count candidates :max-tokens max-tokens :sampler sampler
+                                                   :temperature (max retry-temperature temperature))
+                 (list (unconstrained-lisp model prompt :max-tokens max-tokens :sampler sampler))))
+           (check (text complete)
+             (cond ((not complete)
+                    (values text (list :ok nil :error (format nil "the form was not finished within ~D tokens"
+                                                              max-tokens))
+                            nil))
+                   (repair-parens (check-candidates text tests timeout isolation))
+                   (t (values text (evaluate-lisp text :tests tests :timeout timeout :isolation isolation) nil)))))
+      (loop for attempt from 1 to attempts
+            do (let* ((prompt (encode tokenizer (apply-chat-template tokenizer messages :thinking nil)))
+                      (forms (generate prompt (if (= attempt 1) sampler retry-sampler))))
+                 (when (and (= candidates 1) (member (first (first forms)) seen :test #'string=))
+                   (setf forms (generate prompt retry-sampler)))
+                 (push (first (first forms)) seen)
+                 (let ((first-code nil) (first-result nil) (winner nil))
+                   (loop for (text complete closed) in (remove-duplicates forms :key #'first :test #'string=
+                                                                                 :from-end t)
+                         for index from 1
+                         do (multiple-value-bind (c r repaired) (check text complete)
+                              (when (= index 1) (setf first-code c first-result r))
+                              (when stream
+                                (format stream "~&;; attempt ~D~:[~*~;, candidate ~D~]~@[, closing ~D paren~:P the model left open~]~:[~;, parens repaired from indentation~]~%~A~%;; => ~:[~A~;ok~@[, value ~A~]~]~%"
+                                        attempt (> candidates 1) index (and closed (count #\) closed)) repaired
+                                        c
+                                        (getf r :ok)
+                                        (if (getf r :ok)
+                                            (getf r :value)
+                                            (clip (substitute #\Space #\Newline
+                                                              (or (getf r :error)
+                                                                  (format nil "~D failed test~:P" (length (getf r :failures)))))
+                                                  200))))
+                              (when (getf r :ok)
+                                (setf winner (cons c r))
+                                (return))))
+                   (when winner
+                     (return-from write-lisp (values (car winner) t (cdr winner) attempt)))
+                   (setf code first-code result first-result
+                         messages (append messages (list (cons "assistant" code)
+                                                         (cons "user" (feedback result))))))))
+      (values code nil result attempts))))

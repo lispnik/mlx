@@ -122,7 +122,7 @@ losses and initializers.")
    #:load-weights #:save-weights #:value-and-grad #:summary
    ;; layers
    #:linear #:embedding #:as-linear #:layer-norm #:rms-norm #:group-norm #:batch-norm
-   #:dropout #:conv1d #:conv2d #:max-pool-1d #:max-pool-2d #:avg-pool-1d #:avg-pool-2d
+   #:dropout #:conv1d #:conv2d #:conv-transpose1d #:conv-transpose2d #:max-pool-1d #:max-pool-2d #:avg-pool-1d #:avg-pool-2d
    #:sequential #:identity #:prelu #:multi-head-attention #:create-additive-causal-mask
    #:rope #:quantized-linear #:quantized-embedding #:quantize
    #:switch-linear #:quantized-switch-linear #:switch-glu #:swiglu

@@ -6,3 +6,7 @@ bench/run.log
 bench/results.sexp
 train/data.sexp
 train/adapters/
+train/*.log
+train/pipeline.done
+bench/repair-tasks.sexp
+bench/run-diag.log

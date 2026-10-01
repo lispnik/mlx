@@ -34,12 +34,24 @@
   (with-open-file (in (project-file "bench/lisp-tasks.sexp"))
     (let ((*read-eval* nil)) (read in))))
 
+(defun recorded-results ()
+  "Results already in bench/results.sexp, as a list of plists."
+  (let ((file (project-file "bench/results.sexp")))
+    (when (probe-file file)
+      (with-open-file (in file)
+        (let ((*read-eval* nil))
+          (loop for r = (read in nil in) until (eq r in) collect r))))))
+
 (defun run (&key (model "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit") adapters
-                 (configs (remove :loop-bare (mapcar #'first *configs*))) tasks (seed 0))
-  "Run the benchmark with MODEL, plus ADAPTERS (from LLM:SAVE-ADAPTERS) if given."
+                 (configs (remove :loop-bare (mapcar #'first *configs*))) tasks (seed 0) (resume t))
+  "Run the benchmark with MODEL, plus ADAPTERS (from LLM:SAVE-ADAPTERS) if
+given.  With RESUME, results already recorded for the same model, adapters,
+configuration and task are reused, so an interrupted run can be continued."
   (let* ((lm (let ((lm (llm:load-model model))) (if adapters (llm:load-adapters lm adapters) lm)))
          (all (load-tasks))
          (tasks (if tasks (remove-if-not (lambda (tk) (member (getf tk :name) tasks :test #'string=)) all) all))
+         (adapter-name (and adapters (namestring adapters)))
+         (recorded (and resume (recorded-results)))
          (table '()))
     (dolist (key configs)
       (destructuring-bind (description &rest arguments) (rest (assoc key *configs*))
@@ -47,24 +59,38 @@
           (format t "~&~%== ~A~%" description)
           (dolist (task tasks)
             (mlx.random:seed seed)
-            (let ((start (get-internal-real-time)))
+            (let ((start (get-internal-real-time))
+                  (old (find-if (lambda (r) (and (equal (getf r :model) model)
+                                                 (equal (getf r :adapters) adapter-name)
+                                                 (eq (getf r :config) key)
+                                                 (equal (getf r :task) (getf task :name))))
+                                recorded)))
               (multiple-value-bind (code ok result used)
-                  (apply #'llm:write-lisp lm (getf task :task) :tests (getf task :tests) :stream nil arguments)
+                  (cond (old (values nil (getf old :ok) nil (getf old :attempts)))
+                        ;; one task's failure must not end the run
+                        (t (handler-case (apply #'llm:write-lisp lm (getf task :task) :tests (getf task :tests)
+                                                :stream nil arguments)
+                             (error (e)
+                               (format t "~&  error in ~A: ~A~%" (getf task :name) e)
+                               (values nil nil nil 0)))))
                 (declare (ignore code result))
-                (let ((time (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+                (let ((time (if old
+                                (getf old :seconds)
+                                (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
                   (incf seconds time)
                   (when ok (incf passed) (incf attempts used))
                   (format t "~&  ~:[FAIL~;pass~] ~20A ~5,1Fs~:[~*~; (attempt ~D)~]~%"
                           ok (getf task :name) time (and ok (> used 1)) used)
                   (finish-output)
-                  (with-open-file (out (project-file "bench/results.sexp") :direction :output
-                                                                          :if-exists :append :if-does-not-exist :create)
-                    (with-standard-io-syntax
-                      (let ((*print-readably* nil))
-                        (print (list :model model :adapters (and adapters (namestring adapters))
-                                     :config key :task (getf task :name) :ok ok
-                                     :attempts used :seconds (float time))
-                               out))))))))
+                  (unless old
+                    (with-open-file (out (project-file "bench/results.sexp") :direction :output
+                                                                            :if-exists :append :if-does-not-exist :create)
+                      (with-standard-io-syntax
+                        (let ((*print-readably* nil))
+                          (print (list :model model :adapters adapter-name
+                                       :config key :task (getf task :name) :ok ok
+                                       :attempts used :seconds (float time))
+                                 out)))))))))
           (push (list description passed (length tasks) seconds) table)
           (format t "~&  ~D/~D passed, ~,1Fs in all~%" passed (length tasks) seconds))))
     (format t "~&~%~A~@[ + ~A~]~%~40A ~8A ~10A~%" model adapters "configuration" "passed" "time")

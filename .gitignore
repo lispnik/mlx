@@ -10,3 +10,4 @@ train/*.log
 train/pipeline.done
 bench/repair-tasks.sexp
 bench/run-diag.log
+bench/results-before-diagnostics.sexp

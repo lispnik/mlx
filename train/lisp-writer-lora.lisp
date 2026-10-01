@@ -33,15 +33,21 @@
 
 (defun make-data (&key (model *teacher*) (candidates 4) (attempts 4))
   "Solve every training exercise with MODEL; append the successful
-conversations to train/data.sexp.  Returns (solved total)."
+conversations to train/data.sexp.  Returns the number solved in all."
   (let ((lm (llm:load-model model))
         (tasks (first (read-all (project-file "train/lisp-train-tasks.sexp"))))
         (solved 0))
+    ;; continue an interrupted run: skip exercises already solved
+    (let ((done (and (probe-file (project-file "train/data.sexp"))
+                     (mapcar (lambda (d) (getf d :task)) (read-all (project-file "train/data.sexp"))))))
+      (setf solved (count-if (lambda (task) (member (getf task :name) done :test #'string=)) tasks)
+            tasks (remove-if (lambda (task) (member (getf task :name) done :test #'string=)) tasks)))
     (dolist (task tasks)
       (mlx.random:seed 0)
       (multiple-value-bind (code ok result used messages)
-          (llm:write-lisp lm (getf task :task) :tests (getf task :tests) :stream nil
-                                               :candidates candidates :attempts attempts)
+          (handler-case (llm:write-lisp lm (getf task :task) :tests (getf task :tests) :stream nil
+                                                             :candidates candidates :attempts attempts)
+            (error (e) (format t "~&  error: ~A~%" e) (values nil nil nil 0 nil)))
         (declare (ignore result))
         (format t "~&  ~:[FAIL~;ok  ~] ~A~@[ (attempt ~D)~]~%" ok (getf task :name) (and ok (> used 1) used))
         (finish-output)
@@ -52,8 +58,8 @@ conversations to train/data.sexp.  Returns (solved total)."
             (with-standard-io-syntax
               (let ((*print-readably* nil))
                 (print (list :task (getf task :name) :messages messages :reply code) out)))))))
-    (format t "~&~D/~D exercises solved~%" solved (length tasks))
-    (list solved (length tasks))))
+    (format t "~&~D exercises solved in all~%" solved)
+    solved))
 
 (defun train (&key (model *student*) (iterations 300) (batch-size 4) (learning-rate 1e-4)
                    (rank 8) (num-layers 16) (output "train/adapters/qwen2.5-coder-3b-lisp.safetensors"))

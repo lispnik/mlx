@@ -36,51 +36,56 @@ generation-seconds acceptance), ACCEPTANCE the fraction of drafts kept."
          (count 0) (proposed 0) (accepted 0)
          (pending (last prompt-ids))          ; for the target: not yet in its cache
          (draft-pending (last prompt-ids)))   ; likewise for the draft
-    (prefill model (butlast prompt-ids) target-cache)
-    (prefill draft (butlast prompt-ids) draft-cache)
-    (block generation
-      (loop
-        (let* ((k (max 1 (min draft-tokens (- max-tokens count 1))))
-               (target-offset (cache-offset target-cache))
-               (draft-offset (cache-offset draft-cache))
-               ;; the draft proposes K tokens, greedily
-               (drafts (let ((input draft-pending) (out '()))
-                         (dotimes (i k (nreverse out))
-                           (let ((d (mx:with-scope ()
-                                      (mx:item (mx:argmax (mx:ref (funcall draft (mx:from-lisp (list input) :dtype :int32)
-                                                                           draft-cache)
-                                                                  t -1)
-                                                          :axis -1)))))
-                             (push d out)
-                             (setf input (list d))))))
-               ;; the target samples a token after each of pending, d1 .. dK
-               (samples (mx:with-scope ()
-                          (let* ((logits (funcall model (mx:from-lisp (list (append pending drafts)) :dtype :int32)
-                                                  target-cache))
-                                 (last-positions (mx:ref logits 0 (list (- (mx:dim logits 1) (1+ k)) nil))))
-                            (coerce (mx:to-lisp (mx:astype (funcall sampler last-positions) :int32)) 'list))))
-               (n (loop for d in drafts for s in samples while (= d s) count t)))
-          (unless prompt-time
-            (setf prompt-time (/ (- (get-internal-real-time) start) internal-time-units-per-second)
-                  start (get-internal-real-time)))
-          (incf proposed k)
-          (incf accepted n)
-          ;; emit t0 .. tn: the accepted drafts and the target's next token
-          (loop for id in (subseq samples 0 (1+ n))
-                do (when (or (member id eos-ids) (>= count max-tokens))
-                     (return-from generation))
-                   (incf count)
-                   (funcall function id))
-          ;; keep what both caches share with the accepted text
-          (rewind-cache target-cache (+ target-offset (length pending) n))
-          (let ((next (nth n samples)))
-            (setf pending (list next))
-            (if (< n k)
-                (progn (rewind-cache draft-cache (+ draft-offset (length draft-pending) n))
-                       (setf draft-pending (list next)))
-                ;; every draft accepted: the draft never saw its own last one
-                (setf draft-pending (list (car (last drafts)) next))))
-          (when (>= count max-tokens) (return-from generation)))))
+    (unwind-protect
+         (progn
+           (prefill model (butlast prompt-ids) target-cache)
+           (prefill draft (butlast prompt-ids) draft-cache)
+           (block generation
+             (loop
+               (let* ((k (max 1 (min draft-tokens (- max-tokens count 1))))
+                      (target-offset (cache-offset target-cache))
+                      (draft-offset (cache-offset draft-cache))
+                      ;; the draft proposes K tokens, greedily
+                      (drafts (let ((input draft-pending) (out '()))
+                                (dotimes (i k (nreverse out))
+                                  (let ((d (mx:with-scope ()
+                                             (mx:item (mx:argmax (mx:ref (funcall draft (mx:from-lisp (list input) :dtype :int32)
+                                                                                  draft-cache)
+                                                                         t -1)
+                                                                 :axis -1)))))
+                                    (push d out)
+                                    (setf input (list d))))))
+                      ;; the target samples a token after each of pending, d1 .. dK
+                      (samples (mx:with-scope ()
+                                 (let* ((logits (funcall model (mx:from-lisp (list (append pending drafts)) :dtype :int32)
+                                                         target-cache))
+                                        (last-positions (mx:ref logits 0 (list (- (mx:dim logits 1) (1+ k)) nil))))
+                                   (coerce (mx:to-lisp (mx:astype (funcall sampler last-positions) :int32)) 'list))))
+                      (n (loop for d in drafts for s in samples while (= d s) count t)))
+                 (unless prompt-time
+                   (setf prompt-time (/ (- (get-internal-real-time) start) internal-time-units-per-second)
+                         start (get-internal-real-time)))
+                 (incf proposed k)
+                 (incf accepted n)
+                 ;; emit t0 .. tn: the accepted drafts and the target's next token
+                 (loop for id in (subseq samples 0 (1+ n))
+                       do (when (or (member id eos-ids) (>= count max-tokens))
+                            (return-from generation))
+                          (incf count)
+                          (funcall function id))
+                 ;; keep what both caches share with the accepted text
+                 (rewind-cache target-cache (+ target-offset (length pending) n))
+                 (let ((next (nth n samples)))
+                   (setf pending (list next))
+                   (if (< n k)
+                       (progn (rewind-cache draft-cache (+ draft-offset (length draft-pending) n))
+                              (setf draft-pending (list next)))
+                       ;; every draft accepted: the draft never saw its own last one
+                       (setf draft-pending (list (car (last drafts)) next))))
+                 (when (>= count max-tokens) (return-from generation))))))
+      ;; also on a non-local exit from FUNCTION
+      (free-cache target-cache)
+      (free-cache draft-cache))
     (values count (or prompt-time 0)
             (/ (- (get-internal-real-time) start) internal-time-units-per-second)
             (if (plusp proposed) (/ accepted proposed) 0))))

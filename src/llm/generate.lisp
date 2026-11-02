@@ -156,9 +156,10 @@ FUNCTION).  Returns (values token-count prompt-seconds generation-seconds).
 
 Each step's computation is queued (ASYNC-EVAL) before waiting for the
 previous token, overlapping Lisp work with the GPU."
-  (let ((cache (or cache (make-cache model)))
-        (start (get-internal-real-time))
-        (prompt-time 0) (count 0))
+  (let* ((own-cache (null cache))
+         (cache (or cache (make-cache model)))
+         (start (get-internal-real-time))
+         (prompt-time 0) (count 0))
     (flet ((next-token (input)
              ;; logits of the last position -> the next token; everything
              ;; but that token is freed as soon as the step is built
@@ -195,7 +196,8 @@ previous token, overlapping Lisp work with the GPU."
                  (funcall function id)
                  (mx:free next)
                  (setf next following)))
-          (mx:free next))))
+          (mx:free next)
+          (when own-cache (free-cache cache)))))
     (values count prompt-time
             (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
 

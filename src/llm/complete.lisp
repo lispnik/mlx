@@ -201,44 +201,58 @@ the compiler, in this image, says is undefined in the completed form."
          (fed (make-array (length prompt) :adjustable t :fill-pointer reused
                                           :initial-contents prompt-vector))
          (ids '()) (vocab nil) (tail nil))
-    (when (and lexer (not closed-by-suffix) (plusp reserved))
-      (decf (lisp-lexer-depth lexer) reserved))
-    (when (< reused (1- (length prompt)))
-      (mx:with-scope ()
-        (funcall model (mx:from-lisp (list (subseq prompt reused (1- (length prompt)))) :dtype :int32) cache)
-        (mx:eval (loop for c in cache collect (kv-cache-keys c) collect (kv-cache-values c)))))
-    (setf (fill-pointer fed) (1- (length prompt)))
-    (let ((input (last prompt)))
-      (loop repeat max-tokens
-            do (let ((id (mx:with-scope ()
-                           (let* ((logits (mx:ref (funcall model (mx:from-lisp (list input) :dtype :int32) cache) t -1))
-                                  (unconstrained (mx:item (mx:argmax logits :axis -1))))
-                             (setf vocab (or vocab (mx:dim logits -1)))
-                             (cond ((or (gethash unconstrained special)
-                                        (member unconstrained (eos-tokens tokenizer)))
-                                    nil)
-                                   ;; the model means to close the form, but the
-                                   ;; text after point does that: it is done
-                                   ((and closed-by-suffix
-                                         (setf tail (text-before-close lexer (svref (lisp-constraint-octets constraint)
-                                                                                    unconstrained))))
-                                    nil)
-                                   (lexer (mx:item (mx:argmax (mx:add logits (lisp-mask constraint lexer vocab
-                                                                                        :forbid-close closed-by-suffix))
-                                                              :axis -1)))
-                                   (t unconstrained))))))
-                 (vector-push-extend (first input) fed)       ; now in the cache
-                 (unless id (return))
-                 (when lexer (lex-octets lexer (svref (lisp-constraint-octets constraint) id)))
-                 (push id ids)
-                 (setf input (list id))
-                 (when (or (and lexer (lisp-form-complete-p lexer))
-                           (and (eq mode :line) (find #\Newline (decode tokenizer (reverse ids)))))
-                   (return)))))
-    (when reuse
-      (setf (prompt-cache-model reuse) model
-            (prompt-cache-ids reuse) (coerce fed 'simple-vector)
-            (prompt-cache-kv reuse) cache))
+    (let ((finished nil))
+      (unwind-protect
+           (progn
+             (when (and lexer (not closed-by-suffix) (plusp reserved))
+               (decf (lisp-lexer-depth lexer) reserved))
+             (when (< reused (1- (length prompt)))
+               (mx:with-scope ()
+                 (funcall model (mx:from-lisp (list (subseq prompt reused (1- (length prompt)))) :dtype :int32) cache)
+                 (mx:eval (loop for c in cache collect (kv-cache-keys c) collect (kv-cache-values c)))))
+             (setf (fill-pointer fed) (1- (length prompt)))
+             (let ((input (last prompt)))
+               (loop repeat max-tokens
+                     do (let ((id (mx:with-scope ()
+                                    (let* ((logits (mx:ref (funcall model (mx:from-lisp (list input) :dtype :int32) cache) t -1))
+                                           (unconstrained (mx:item (mx:argmax logits :axis -1))))
+                                      (setf vocab (or vocab (mx:dim logits -1)))
+                                      (cond ((or (gethash unconstrained special)
+                                                 (member unconstrained (eos-tokens tokenizer)))
+                                             nil)
+                                            ;; the model means to close the form, but the
+                                            ;; text after point does that: it is done
+                                            ((and closed-by-suffix
+                                                  (setf tail (text-before-close lexer (svref (lisp-constraint-octets constraint)
+                                                                                             unconstrained))))
+                                             nil)
+                                            (lexer (mx:item (mx:argmax (mx:add logits (lisp-mask constraint lexer vocab
+                                                                                                 :forbid-close closed-by-suffix))
+                                                                       :axis -1)))
+                                            (t unconstrained))))))
+                          (vector-push-extend (first input) fed)       ; now in the cache
+                          (unless id (return))
+                          (when lexer (lex-octets lexer (svref (lisp-constraint-octets constraint) id)))
+                          (push id ids)
+                          (setf input (list id))
+                          (when (or (and lexer (lisp-form-complete-p lexer))
+                                    (and (eq mode :line) (find #\Newline (decode tokenizer (reverse ids)))))
+                            (return)))))
+             (setf finished t))
+        ;; an exit part-way leaves the cache out of step with its ids:
+        ;; drop it, even the one REUSE holds
+        (unless finished
+          (when (and reuse (eq cache (prompt-cache-kv reuse)))
+            (setf (prompt-cache-kv reuse) nil))
+          (free-cache cache))))
+    (cond (reuse
+           ;; a fresh cache replaces the one kept from the last call
+           (let ((old (prompt-cache-kv reuse)))
+             (when (and old (not (eq old cache))) (free-cache old)))
+           (setf (prompt-cache-model reuse) model
+                 (prompt-cache-ids reuse) (coerce fed 'simple-vector)
+                 (prompt-cache-kv reuse) cache))
+          (t (free-cache cache)))
     (let* ((text (concatenate 'string (decode tokenizer (reverse ids)) (or tail "")))
            (text (subseq text (let ((n (min (length healed) (length text))))
                                 (or (mismatch healed text :end1 n :end2 n) n))))

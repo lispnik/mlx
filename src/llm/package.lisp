@@ -13,7 +13,7 @@ with a KV cache, sampling and generation.")
    #:apply-chat-template
    ;; models
    #:load-model #:model-config #:model-tokenizer #:download-model #:resolve-model
-   #:causal-lm #:model-arch #:make-cache #:cache-offset
+   #:causal-lm #:model-arch #:make-cache #:free-cache #:cache-offset
    ;; generation
    #:generate #:generate-tokens #:make-sampler
    ;; writing Lisp

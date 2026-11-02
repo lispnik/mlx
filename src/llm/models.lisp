@@ -130,6 +130,18 @@ left-padded prompts, PADDING lists each row's number of padding tokens."
 
 (defun cache-offset (cache) (kv-cache-offset (first cache)))
 
+(defun free-cache (cache)
+  "Release CACHE's arrays now.  They are exempt from WITH-SCOPE, and the
+garbage collector, which sees little Lisp allocation, would be slow to
+notice gigabytes of them."
+  (let ((padding (and cache (kv-cache-padding (first cache)))))
+    (when padding (mx:free padding)))
+  (dolist (layer cache)
+    (when (kv-cache-keys layer) (mx:free (kv-cache-keys layer)))
+    (when (kv-cache-values layer) (mx:free (kv-cache-values layer)))
+    (setf (kv-cache-keys layer) nil (kv-cache-values layer) nil
+          (kv-cache-padding layer) nil (kv-cache-offset layer) 0)))
+
 (defun cache-update (cache keys values)
   "Append KEYS and VALUES (B heads L dim); return all cached (keys values)."
   (let* ((prev (kv-cache-offset cache))
@@ -143,10 +155,15 @@ left-padded prompts, PADDING lists each row's number of padding tokens."
                (new-k (mx:zeros (list b h grow d) :dtype (mx:dtype keys)))
                (new-v (mx:zeros (list b h grow (mx:dim values 3)) :dtype (mx:dtype values))))
           (if (kv-cache-keys cache)
-              (setf (kv-cache-keys cache)
-                    (mx:concatenate (list (mx:ref (kv-cache-keys cache) t t (list 0 prev)) new-k) :axis 2)
-                    (kv-cache-values cache)
-                    (mx:concatenate (list (mx:ref (kv-cache-values cache) t t (list 0 prev)) new-v) :axis 2))
+              (let ((old-k (kv-cache-keys cache)) (old-v (kv-cache-values cache)))
+                (setf (kv-cache-keys cache)
+                      (mx:concatenate (list (mx:ref old-k t t (list 0 prev)) new-k) :axis 2)
+                      (kv-cache-values cache)
+                      (mx:concatenate (list (mx:ref old-v t t (list 0 prev)) new-v) :axis 2))
+                ;; the grown copies replace these; don't wait for the GC
+                (mx:eval (kv-cache-keys cache) (kv-cache-values cache))
+                (mx:free old-k)
+                (mx:free old-v))
               (setf (kv-cache-keys cache) new-k
                     (kv-cache-values cache) new-v)))))
     (setf (mx:ref (kv-cache-keys cache) t t (list prev end)) keys

@@ -810,3 +810,34 @@ $MLX_CL_TEST_EXACT on hardware like the one they were produced on (M3)."
                (is (equal '(70 71 72 73 74) (reply fresh)))))
         (uiop:delete-file-if-exists tmp)
         (uiop:delete-file-if-exists (make-pathname :type "sexp" :defaults tmp))))))
+
+(test generation-frees-its-caches
+  ;; KV caches are exempt from scopes, so each generator must free its own:
+  ;; MLX memory may not grow from one generation to the next
+  (let* ((model (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256)))
+         (draft (mlx.llm::make-causal-lm (tiny-config "vocab_size" 256 "num_hidden_layers" 1)))
+         (prompt (loop for i below 300 collect (mod (* 7 i) 250)))   ; long enough to grow a cache
+         (reuse (mlx.llm::make-prompt-cache)))
+    (setf (llm:model-tokenizer model) (byte-tokenizer))
+    (flet ((round-of-everything ()
+             (llm:generate-tokens model prompt #'identity :max-tokens 20)
+             (llm:generate-tokens-batch model (list prompt (subseq prompt 0 40)) :max-tokens 20)
+             (llm:generate-tokens-speculative model draft prompt #'identity :max-tokens 20)
+             (mlx.llm::generate-lisp-forms model '(40 1 2) :count 3 :max-tokens 20)
+             (llm:complete-lisp model "(defun f (x) " :max-tokens 10)
+             ;; a reused cache is replaced as the prompt changes
+             (llm:complete-lisp model "(defun f (x) " :max-tokens 10 :reuse reuse)
+             (llm:complete-lisp model "(defun g (y) " :context "(+ 1 2)" :max-tokens 10 :reuse reuse)
+             ;; a caller that stops early leaves by a non-local exit
+             (catch 'stop
+               (llm:generate-tokens model prompt (lambda (id) (declare (ignore id)) (throw 'stop nil))
+                                    :max-tokens 20))
+             (catch 'stop
+               (llm:generate-tokens-speculative model draft prompt
+                                                (lambda (id) (declare (ignore id)) (throw 'stop nil))
+                                                :max-tokens 20))))
+      (round-of-everything)
+      (let ((before (mx:active-memory)))
+        (dotimes (i 5) (round-of-everything))
+        (is (<= (- (mx:active-memory) before) 100000)
+            "~:D bytes leaked" (- (mx:active-memory) before))))))

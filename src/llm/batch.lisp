@@ -56,7 +56,7 @@ to ids (B).  Returns (values id-lists prompt-seconds generation-seconds)."
                         (when (or (null following) (every #'identity done))
                           (return))))
           (when next (mx:free next))
-          (dolist (c cache) (when (kv-cache-padding c) (mx:free (kv-cache-padding c)) (return))))))
+          (free-cache cache))))
     (values (map 'list #'reverse outputs)
             prompt-time
             (/ (- (get-internal-real-time) start) internal-time-units-per-second))))

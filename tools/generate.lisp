@@ -207,6 +207,8 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
 
 (defun parse-typedef (stmt)
   (cond
+    ;; a forward declaration (typedef struct x_ x;): the full one is elsewhere
+    ((and (starts-with "typedef struct" stmt) (not (find #\{ stmt))))
     ((starts-with "typedef struct" stmt)
      (let* ((open (position #\{ stmt))
             (close (position #\} stmt :from-end t))
@@ -408,7 +410,13 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
     ("mlx_random_categorical_shape" . "%CATEGORICAL-SHAPE")
     ("mlx_random_categorical_num_samples" . "%CATEGORICAL-NUM-SAMPLES")
     ("mlx_random_permutation" . "%PERMUTATION")
-    ("mlx_random_permutation_arange" . "%PERMUTATION-ARANGE")))
+    ("mlx_random_permutation_arange" . "%PERMUTATION-ARANGE")
+    ;; mlx-c 0.8 moved trace's keywords to mlx_trace_axes; keep them on TRACE
+    ("mlx_trace" . "%TRACE") ("mlx_trace_axes" . "TRACE")
+    ;; likewise the variants with more options become the public names
+    ("mlx_linspace" . "%LINSPACE") ("mlx_linspace_endpoint" . "LINSPACE")
+    ("mlx_ones_like" . "%ONES-LIKE") ("mlx_ones_like_dtype" . "ONES-LIKE")
+    ("mlx_zeros_like" . "%ZEROS-LIKE") ("mlx_zeros_like_dtype" . "ZEROS-LIKE")))
 
 ;; Axis families: public dispatcher -> variants chosen by the type of the
 ;; dispatch argument (NIL / integer / list).
@@ -421,10 +429,18 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
     ("ARGPARTITION" "AXIS" "-1" nil "mlx_argpartition" "mlx_argpartition_axis" nil)
     ("ARGSORT" "AXIS" "-1" nil "mlx_argsort" "mlx_argsort_axis" nil)
     ("CONCATENATE" "AXIS" "0" nil "mlx_concatenate" "mlx_concatenate_axis" nil)
+    ("COUNT-NONZERO" "AXIS" "nil" nil "mlx_count_nonzero" "mlx_count_nonzero_axis" "mlx_count_nonzero_axes")
+    ("CUMMAX" "AXIS" nil t "mlx_cummax" "mlx_cummax_axis" nil)
+    ("CUMMIN" "AXIS" nil t "mlx_cummin" "mlx_cummin_axis" nil)
+    ("CUMPROD" "AXIS" nil t "mlx_cumprod" "mlx_cumprod_axis" nil)
+    ("CUMSUM" "AXIS" nil t "mlx_cumsum" "mlx_cumsum_axis" nil)
     ("EXPAND-DIMS" "AXIS" nil t nil "mlx_expand_dims" "mlx_expand_dims_axes")
+    ("FLIP" "AXIS" "nil" nil "mlx_flip" "mlx_flip_axis" "mlx_flip_axes")
+    ("LOGCUMSUMEXP" "AXIS" nil t "mlx_logcumsumexp" "mlx_logcumsumexp_axis" nil)
     ("LOGSUMEXP" "AXIS" "nil" nil "mlx_logsumexp" "mlx_logsumexp_axis" "mlx_logsumexp_axes")
     ("MAX" "AXIS" "nil" nil "mlx_max" "mlx_max_axis" "mlx_max_axes")
     ("MEAN" "AXIS" "nil" nil "mlx_mean" "mlx_mean_axis" "mlx_mean_axes")
+    ("MEDIAN" "AXIS" nil t "mlx_median" "mlx_median_axis" "mlx_median_axes")
     ("MIN" "AXIS" "nil" nil "mlx_min" "mlx_min_axis" "mlx_min_axes")
     ("PARTITION" "AXIS" "-1" nil "mlx_partition" "mlx_partition_axis" nil)
     ("PROD" "AXIS" "nil" nil "mlx_prod" "mlx_prod_axis" "mlx_prod_axes")
@@ -439,6 +455,7 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
     ("TAKE" "AXIS" "nil" nil "mlx_take" "mlx_take_axis" nil)
     ("TOPK" "AXIS" "-1" nil "mlx_topk" "mlx_topk_axis" nil)
     ("TRANSPOSE" "AXES" "nil" nil "mlx_transpose" nil "mlx_transpose_axes")
+    ("UNSTACK" "AXIS" "0" nil "mlx_unstack" "mlx_unstack_axis" nil)
     ("VAR" "AXIS" "nil" nil "mlx_var" "mlx_var_axis" "mlx_var_axes")))
 
 ;; Default values (Lisp source text) by parameter name.  A parameter with a
@@ -469,8 +486,11 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
   '(("mlx_astype" "dtype" nil) ("mlx_view" "dtype" nil) ("mlx_from_fp8" "dtype" nil)
     ("mlx_full_like" "dtype" (:computed "(dtype-of a)"))
     ("mlx_full" "dtype" (:computed "(dtype-of vals)"))
-    ("mlx_trace" "dtype" (:computed "(dtype-of a)"))
-    ("mlx_trace" "offset" "0") ("mlx_trace" "axis1" "0") ("mlx_trace" "axis2" "1")
+    ("mlx_trace_axes" "dtype" (:computed "(dtype-of a)"))
+    ("mlx_trace_axes" "offset" "0") ("mlx_trace_axes" "axis1" "0") ("mlx_trace_axes" "axis2" "1")
+    ;; an optional dtype: NIL keeps the input's
+    ("mlx_cumsum" "dtype" "nil") ("mlx_cumsum_axis" "dtype" "nil")
+    ("mlx_cumprod" "dtype" "nil") ("mlx_cumprod_axis" "dtype" "nil")
     ("mlx_diagonal" "offset" "0") ("mlx_diagonal" "axis1" "0") ("mlx_diagonal" "axis2" "1")
     ("mlx_diag" "k" "0") ("mlx_tril" "k" "0") ("mlx_triu" "k" "0")
     ("mlx_eye" "m" (:computed "n")) ("mlx_eye" "k" "0")
@@ -487,6 +507,15 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
     ("mlx_quantize" "mode" "\"affine\"") ("mlx_dequantize" "mode" "\"affine\"")
     ("mlx_quantized_matmul" "mode" "\"affine\"") ("mlx_gather_qmm" "mode" "\"affine\"")
     ("mlx_qqmm" "mode" "\"nvfp4\"")
+    ;; new in mlx-c 0.8, defaults as in MLX's C++ API
+    ("mlx_gather_qqmm" "mode" "\"nvfp4\"")
+    ("mlx_diff" "n" "1") ("mlx_diff" "axis" "-1") ("mlx_vecdot" "axis" "-1")
+    ("mlx_searchsorted" "side" "\"left\"")
+    ("mlx_unique" "return_index" "nil") ("mlx_unique" "return_inverse" "nil")
+    ("mlx_unique" "return_counts" "nil")
+    ("mlx_linspace_endpoint" "endpoint" "t")
+    ("mlx_ones_like_dtype" "dtype" (:computed "(dtype-of a)"))
+    ("mlx_zeros_like_dtype" "dtype" (:computed "(dtype-of a)"))
     ("mlx_pad" "mode" "\"constant\"") ("mlx_pad" "pad_value" "0")
     ("mlx_pad_symmetric" "mode" "\"constant\"") ("mlx_pad_symmetric" "pad_value" "0")
     ;; fft
@@ -528,7 +557,7 @@ doc comments become @@DOC<n>@@ markers indexing *DOCS*."
     ;; generic names that mean something else in these functions
     ("mlx_random_truncated_normal" "upper" nil)
     ("mlx_hadamard_transform" "scale" "nil")
-    ("mlx_dequantize" "dtype" "nil")
+    ("mlx_dequantize" "dtype" "nil") ("mlx_fast_scaled_dot_product_attention" "force_fused" "nil")
     ("mlx_random_normal_broadcast" "loc" "nil") ("mlx_random_normal_broadcast" "scale" "nil")
     ("mlx_conv_general" "stride" nil)
     ("mlx_tri" "type" ":float32")
@@ -756,9 +785,9 @@ $MLX_C_INCLUDE, /opt/homebrew/include/mlx/c or /usr/local/include/mlx/c."
 (defparameter *expected-vtable*
   '("mlx_io_vtable"
     "bool (*is_open)(void*)" "bool (*good)(void*)" "size_t (*tell)(void*)"
-    "void (*seek)(void*, int64_t off, int whence)" "void (*read)(void*, char* data, size_t n)"
-    "void (*read_at_offset)(void*, char* data, size_t n, size_t off)"
-    "void (*write)(void*, const char* data, size_t n)" "const char* (*label)(void*)"
+    "int (*seek)(void*, int64_t off, int whence)" "size_t (*read)(void*, char* data, size_t n)"
+    "size_t (*read_at_offset)(void*, char* data, size_t n, size_t off)"
+    "size_t (*write)(void*, const char* data, size_t n)" "const char* (*label)(void*)"
     "void (*free)(void*)")
   "Filled field by field in src/io.lisp.")
 

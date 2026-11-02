@@ -66,6 +66,25 @@
   :stream t
   :doc "C: int mlx_distributed_sum_scatter( mlx_array* res, const mlx_array x, const mlx_distributed_group group /* may be null */ , const mlx_stream s)")
 
+(define-op mlx.fast:cross-entropy mlx-ffi:mlx-fast-cross-entropy
+  :returns (:array)
+  :args ((logits :array)
+         (targets :array))
+  :stream t
+  :doc "C: int mlx_fast_cross_entropy( mlx_array* res, const mlx_array logits, const mlx_array targets, const mlx_stream s)")
+
+(define-op mlx.fast:gated-delta-update mlx-ffi:mlx-fast-gated-delta-update
+  :returns (:arrays)
+  :args ((queries :array)
+         (keys :array)
+         (values :array)
+         (gates :array)
+         (beta- :array)
+         (initial-state :array-or-null :default nil)
+         (mask :array-or-null :default nil))
+  :stream t
+  :doc "C: int mlx_fast_gated_delta_update( mlx_vector_array* res, const mlx_array queries, const mlx_array keys, const mlx_array values, const mlx_array gates, const mlx_array beta_, const mlx_array initial_state /* may be null */ , const mlx_array mask /* may be null */ , const mlx_stream s)")
+
 (define-op mlx.fast:layer-norm mlx-ffi:mlx-fast-layer-norm
   :returns (:array)
   :args ((x :array)
@@ -115,9 +134,10 @@
          (scale :float)
          (mask-mode :string :default "")
          (mask-arr :array-or-null :default nil)
-         (sinks :array-or-null :default nil))
+         (sinks :array-or-null :default nil)
+         (force-fused :bool :default nil))
   :stream t
-  :doc "C: int mlx_fast_scaled_dot_product_attention( mlx_array* res, const mlx_array queries, const mlx_array keys, const mlx_array values, float scale, const char* mask_mode, const mlx_array mask_arr /* may be null */ , const mlx_array sinks /* may be null */ , const mlx_stream s)")
+  :doc "C: int mlx_fast_scaled_dot_product_attention( mlx_array* res, const mlx_array queries, const mlx_array keys, const mlx_array values, float scale, const char* mask_mode, const mlx_array mask_arr /* may be null */ , const mlx_array sinks /* may be null */ , bool force_fused, const mlx_stream s)")
 
 (define-op mlx.fft:fft mlx-ffi:mlx-fft-fft
   :returns (:array)
@@ -277,6 +297,12 @@
   :stream t
   :doc "C: int mlx_linalg_cross( mlx_array* res, const mlx_array a, const mlx_array b, int axis, const mlx_stream s)")
 
+(define-op mlx.linalg:det mlx-ffi:mlx-linalg-det
+  :returns (:array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_linalg_det(mlx_array* res, const mlx_array a, const mlx_stream s)")
+
 (define-op mlx.linalg:eig mlx-ffi:mlx-linalg-eig
   :returns (:array :array)
   :args ((a :array))
@@ -358,6 +384,12 @@
   :args ((a :array))
   :stream t
   :doc "C: int mlx_linalg_qr( mlx_array* res_0, mlx_array* res_1, const mlx_array a, const mlx_stream s)")
+
+(define-op mlx.linalg:slogdet mlx-ffi:mlx-linalg-slogdet
+  :returns (:array :array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_linalg_slogdet( mlx_array* res_0, mlx_array* res_1, const mlx_array a, const mlx_stream s)")
 
 (define-op mlx.linalg:solve mlx-ffi:mlx-linalg-solve
   :returns (:array)
@@ -844,41 +876,100 @@
   :stream t
   :doc "C: int mlx_cosh(mlx_array* res, const mlx_array a, const mlx_stream s)")
 
-(define-op mlx:cummax mlx-ffi:mlx-cummax
+(define-op mlx:count-nonzero-axis mlx-ffi:mlx-count-nonzero-axis
   :returns (:array)
   :args ((a :array)
          (axis :int)
-         (reverse :bool :default nil)
-         (inclusive :bool :default t))
+         (keepdims :bool :default nil))
   :stream t
-  :doc "C: int mlx_cummax( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+  :doc "C: int mlx_count_nonzero_axis( mlx_array* res, const mlx_array a, int axis, bool keepdims, const mlx_stream s)")
 
-(define-op mlx:cummin mlx-ffi:mlx-cummin
+(define-op mlx:count-nonzero-axes mlx-ffi:mlx-count-nonzero-axes
   :returns (:array)
   :args ((a :array)
-         (axis :int)
-         (reverse :bool :default nil)
-         (inclusive :bool :default t))
+         (axes :ints)
+         (keepdims :bool :default nil))
   :stream t
-  :doc "C: int mlx_cummin( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+  :doc "C: int mlx_count_nonzero_axes( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, bool keepdims, const mlx_stream s)")
 
-(define-op mlx:cumprod mlx-ffi:mlx-cumprod
+(define-op %count-nonzero mlx-ffi:mlx-count-nonzero
   :returns (:array)
   :args ((a :array)
-         (axis :int)
-         (reverse :bool :default nil)
-         (inclusive :bool :default t))
+         (keepdims :bool :default nil))
   :stream t
-  :doc "C: int mlx_cumprod( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+  :doc "C: int mlx_count_nonzero( mlx_array* res, const mlx_array a, bool keepdims, const mlx_stream s)")
 
-(define-op mlx:cumsum mlx-ffi:mlx-cumsum
+(define-op mlx:cummax-axis mlx-ffi:mlx-cummax-axis
   :returns (:array)
   :args ((a :array)
          (axis :int)
          (reverse :bool :default nil)
          (inclusive :bool :default t))
   :stream t
-  :doc "C: int mlx_cumsum( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+  :doc "C: int mlx_cummax_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+
+(define-op %cummax mlx-ffi:mlx-cummax
+  :returns (:array)
+  :args ((a :array)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t))
+  :stream t
+  :doc "C: int mlx_cummax( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, const mlx_stream s)")
+
+(define-op mlx:cummin-axis mlx-ffi:mlx-cummin-axis
+  :returns (:array)
+  :args ((a :array)
+         (axis :int)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t))
+  :stream t
+  :doc "C: int mlx_cummin_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+
+(define-op %cummin mlx-ffi:mlx-cummin
+  :returns (:array)
+  :args ((a :array)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t))
+  :stream t
+  :doc "C: int mlx_cummin( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, const mlx_stream s)")
+
+(define-op mlx:cumprod-axis mlx-ffi:mlx-cumprod-axis
+  :returns (:array)
+  :args ((a :array)
+         (axis :int)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t)
+         (dtype :optional-dtype :default nil))
+  :stream t
+  :doc "C: int mlx_cumprod_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)")
+
+(define-op %cumprod mlx-ffi:mlx-cumprod
+  :returns (:array)
+  :args ((a :array)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t)
+         (dtype :optional-dtype :default nil))
+  :stream t
+  :doc "C: int mlx_cumprod( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)")
+
+(define-op mlx:cumsum-axis mlx-ffi:mlx-cumsum-axis
+  :returns (:array)
+  :args ((a :array)
+         (axis :int)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t)
+         (dtype :optional-dtype :default nil))
+  :stream t
+  :doc "C: int mlx_cumsum_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)")
+
+(define-op %cumsum mlx-ffi:mlx-cumsum
+  :returns (:array)
+  :args ((a :array)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t)
+         (dtype :optional-dtype :default nil))
+  :stream t
+  :doc "C: int mlx_cumsum( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)")
 
 (define-op mlx:degrees mlx-ffi:mlx-degrees
   :returns (:array)
@@ -921,6 +1012,14 @@
          (axis2 :int :default 1))
   :stream t
   :doc "C: int mlx_diagonal( mlx_array* res, const mlx_array a, int offset, int axis1, int axis2, const mlx_stream s)")
+
+(define-op mlx:diff mlx-ffi:mlx-diff
+  :returns (:array)
+  :args ((a :array)
+         (n :int :default 1)
+         (axis :int :default -1))
+  :stream t
+  :doc "C: int mlx_diff( mlx_array* res, const mlx_array a, int n, int axis, const mlx_stream s)")
 
 (define-op mlx:divide mlx-ffi:mlx-divide
   :returns (:array)
@@ -1005,6 +1104,26 @@
   :stream t
   :doc "C: int mlx_flatten( mlx_array* res, const mlx_array a, int start_axis, int end_axis, const mlx_stream s)")
 
+(define-op mlx:flip-axes mlx-ffi:mlx-flip-axes
+  :returns (:array)
+  :args ((a :array)
+         (axes :ints))
+  :stream t
+  :doc "C: int mlx_flip_axes( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, const mlx_stream s)")
+
+(define-op mlx:flip-axis mlx-ffi:mlx-flip-axis
+  :returns (:array)
+  :args ((a :array)
+         (axis :int))
+  :stream t
+  :doc "C: int mlx_flip_axis( mlx_array* res, const mlx_array a, int axis, const mlx_stream s)")
+
+(define-op %flip mlx-ffi:mlx-flip
+  :returns (:array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_flip(mlx_array* res, const mlx_array a, const mlx_stream s)")
+
 (define-op mlx:floor mlx-ffi:mlx-floor
   :returns (:array)
   :args ((a :array))
@@ -1081,9 +1200,26 @@
          (group-size :optional-int :default nil)
          (bits :optional-int :default nil)
          (mode :string :default "affine")
+         (global-scale :array-or-null :default nil)
          (sorted-indices :bool :default nil))
   :stream t
-  :doc "C: int mlx_gather_qmm( mlx_array* res, const mlx_array x, const mlx_array w, const mlx_array scales, const mlx_array biases /* may be null */ , const mlx_array lhs_indices /* may be null */ , const mlx_array rhs_indices /* may be null */ , bool transpose, mlx_optional_int group_size, mlx_optional_int bits, const char* mode, bool sorted_indices, const mlx_stream s)")
+  :doc "C: int mlx_gather_qmm( mlx_array* res, const mlx_array x, const mlx_array w, const mlx_array scales, const mlx_array biases /* may be null */ , const mlx_array lhs_indices /* may be null */ , const mlx_array rhs_indices /* may be null */ , bool transpose, mlx_optional_int group_size, mlx_optional_int bits, const char* mode, const mlx_array global_scale /* may be null */ , bool sorted_indices, const mlx_stream s)")
+
+(define-op mlx:gather-qqmm mlx-ffi:mlx-gather-qqmm
+  :returns (:array)
+  :args ((x :array)
+         (w :array)
+         (scales-w :array-or-null :default nil)
+         (lhs-indices :array-or-null :default nil)
+         (rhs-indices :array-or-null :default nil)
+         (group-size :optional-int :default nil)
+         (bits :optional-int :default nil)
+         (mode :string :default "nvfp4")
+         (global-scale-x :array-or-null :default nil)
+         (global-scale-w :array-or-null :default nil)
+         (sorted-indices :bool :default nil))
+  :stream t
+  :doc "C: int mlx_gather_qqmm( mlx_array* res, const mlx_array x, const mlx_array w, const mlx_array scales_w /* may be null */ , const mlx_array lhs_indices /* may be null */ , const mlx_array rhs_indices /* may be null */ , mlx_optional_int group_size, mlx_optional_int bits, const char* mode, const mlx_array global_scale_x /* may be null */ , const mlx_array global_scale_w /* may be null */ , bool sorted_indices, const mlx_stream s)")
 
 (define-op mlx:greater mlx-ffi:mlx-greater
   :returns (:array)
@@ -1206,7 +1342,17 @@
   :stream t
   :doc "C: int mlx_less_equal( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)")
 
-(define-op mlx:linspace mlx-ffi:mlx-linspace
+(define-op mlx:linspace mlx-ffi:mlx-linspace-endpoint
+  :returns (:array)
+  :args ((start :double)
+         (stop :double)
+         (num :int :default 50)
+         (endpoint :bool :default t)
+         (dtype :dtype :default :float32))
+  :stream t
+  :doc "C: int mlx_linspace_endpoint( mlx_array* res, double start, double stop, int num, bool endpoint, mlx_dtype dtype, const mlx_stream s)")
+
+(define-op %linspace mlx-ffi:mlx-linspace
   :returns (:array)
   :args ((start :double)
          (stop :double)
@@ -1246,14 +1392,22 @@
   :stream t
   :doc "C: int mlx_logaddexp( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)")
 
-(define-op mlx:logcumsumexp mlx-ffi:mlx-logcumsumexp
+(define-op mlx:logcumsumexp-axis mlx-ffi:mlx-logcumsumexp-axis
   :returns (:array)
   :args ((a :array)
          (axis :int)
          (reverse :bool :default nil)
          (inclusive :bool :default t))
   :stream t
-  :doc "C: int mlx_logcumsumexp( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+  :doc "C: int mlx_logcumsumexp_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)")
+
+(define-op %logcumsumexp mlx-ffi:mlx-logcumsumexp
+  :returns (:array)
+  :args ((a :array)
+         (reverse :bool :default nil)
+         (inclusive :bool :default t))
+  :stream t
+  :doc "C: int mlx_logcumsumexp( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, const mlx_stream s)")
 
 (define-op mlx:logical-and mlx-ffi:mlx-logical-and
   :returns (:array)
@@ -1274,6 +1428,13 @@
          (b :array))
   :stream t
   :doc "C: int mlx_logical_or( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)")
+
+(define-op mlx:logical-xor mlx-ffi:mlx-logical-xor
+  :returns (:array)
+  :args ((a :array)
+         (b :array))
+  :stream t
+  :doc "C: int mlx_logical_xor( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)")
 
 (define-op mlx:logsumexp-axes mlx-ffi:mlx-logsumexp-axes
   :returns (:array)
@@ -1312,6 +1473,12 @@
          (b :array))
   :stream t
   :doc "C: int mlx_matmul( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)")
+
+(define-op mlx:matrix-transpose mlx-ffi:mlx-matrix-transpose
+  :returns (:array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_matrix_transpose(mlx_array* res, const mlx_array a, const mlx_stream s)")
 
 (define-op mlx:max-axes mlx-ffi:mlx-max-axes
   :returns (:array)
@@ -1366,13 +1533,28 @@
   :stream t
   :doc "C: int mlx_mean( mlx_array* res, const mlx_array a, bool keepdims, const mlx_stream s)")
 
-(define-op mlx:median mlx-ffi:mlx-median
+(define-op mlx:median-axes mlx-ffi:mlx-median-axes
   :returns (:array)
   :args ((a :array)
          (axes :ints)
          (keepdims :bool :default nil))
   :stream t
-  :doc "C: int mlx_median( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, bool keepdims, const mlx_stream s)")
+  :doc "C: int mlx_median_axes( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, bool keepdims, const mlx_stream s)")
+
+(define-op mlx:median-axis mlx-ffi:mlx-median-axis
+  :returns (:array)
+  :args ((a :array)
+         (axis :int)
+         (keepdims :bool :default nil))
+  :stream t
+  :doc "C: int mlx_median_axis( mlx_array* res, const mlx_array a, int axis, bool keepdims, const mlx_stream s)")
+
+(define-op %median mlx-ffi:mlx-median
+  :returns (:array)
+  :args ((a :array)
+         (keepdims :bool :default nil))
+  :stream t
+  :doc "C: int mlx_median( mlx_array* res, const mlx_array a, bool keepdims, const mlx_stream s)")
 
 (define-op mlx:meshgrid mlx-ffi:mlx-meshgrid
   :returns (:arrays)
@@ -1465,7 +1647,14 @@
   :stream t
   :doc "C: int mlx_ones( mlx_array* res, const int* shape, size_t shape_num, mlx_dtype dtype, const mlx_stream s)")
 
-(define-op mlx:ones-like mlx-ffi:mlx-ones-like
+(define-op mlx:ones-like mlx-ffi:mlx-ones-like-dtype
+  :returns (:array)
+  :args ((a :array)
+         (dtype :dtype :computed (dtype-of a)))
+  :stream t
+  :doc "C: int mlx_ones_like_dtype( mlx_array* res, const mlx_array a, mlx_dtype dtype, const mlx_stream s)")
+
+(define-op %ones-like mlx-ffi:mlx-ones-like
   :returns (:array)
   :args ((a :array))
   :stream t
@@ -1512,6 +1701,12 @@
          (kth :int))
   :stream t
   :doc "C: int mlx_partition( mlx_array* res, const mlx_array a, int kth, const mlx_stream s)")
+
+(define-op mlx:positive mlx-ffi:mlx-positive
+  :returns (:array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_positive(mlx_array* res, const mlx_array a, const mlx_stream s)")
 
 (define-op mlx:power mlx-ffi:mlx-power
   :returns (:array)
@@ -1776,6 +1971,14 @@
          (axis :int))
   :stream t
   :doc "C: int mlx_scatter_prod_single( mlx_array* res, const mlx_array a, const mlx_array indices, const mlx_array updates, int axis, const mlx_stream s)")
+
+(define-op mlx:searchsorted mlx-ffi:mlx-searchsorted
+  :returns (:array)
+  :args ((sorted-sequence :array)
+         (values :array)
+         (side :string :default "left"))
+  :stream t
+  :doc "C: int mlx_searchsorted( mlx_array* res, const mlx_array sorted_sequence, const mlx_array values, const char* side, const mlx_stream s)")
 
 (define-op mlx:segmented-mm mlx-ffi:mlx-segmented-mm
   :returns (:array)
@@ -2133,7 +2336,7 @@
   :stream t
   :doc "C: int mlx_topk(mlx_array* res, const mlx_array a, int k, const mlx_stream s)")
 
-(define-op mlx:trace mlx-ffi:mlx-trace
+(define-op mlx:trace mlx-ffi:mlx-trace-axes
   :returns (:array)
   :args ((a :array)
          (offset :int :default 0)
@@ -2141,7 +2344,13 @@
          (axis2 :int :default 1)
          (dtype :dtype :computed (dtype-of a)))
   :stream t
-  :doc "C: int mlx_trace( mlx_array* res, const mlx_array a, int offset, int axis1, int axis2, mlx_dtype dtype, const mlx_stream s)")
+  :doc "C: int mlx_trace_axes( mlx_array* res, const mlx_array a, int offset, int axis1, int axis2, mlx_dtype dtype, const mlx_stream s)")
+
+(define-op %trace mlx-ffi:mlx-trace
+  :returns (:array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_trace(mlx_array* res, const mlx_array a, const mlx_stream s)")
 
 (define-op mlx:transpose-axes mlx-ffi:mlx-transpose-axes
   :returns (:array)
@@ -2179,6 +2388,12 @@
   :stream t
   :doc "C: int mlx_triu(mlx_array* res, const mlx_array x, int k, const mlx_stream s)")
 
+(define-op mlx:trunc mlx-ffi:mlx-trunc
+  :returns (:array)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_trunc(mlx_array* res, const mlx_array a, const mlx_stream s)")
+
 (define-op mlx:unflatten mlx-ffi:mlx-unflatten
   :returns (:array)
   :args ((a :array)
@@ -2186,6 +2401,30 @@
          (shape :ints))
   :stream t
   :doc "C: int mlx_unflatten( mlx_array* res, const mlx_array a, int axis, const int* shape, size_t shape_num, const mlx_stream s)")
+
+(define-op mlx:unique mlx-ffi:mlx-unique
+  :returns (:arrays)
+  :args ((a :array)
+         (size :int)
+         (return-index :bool :default nil)
+         (return-inverse :bool :default nil)
+         (return-counts :bool :default nil)
+         (fill-value :array-or-null :default nil))
+  :stream t
+  :doc "C: int mlx_unique( mlx_vector_array* res, const mlx_array a, int size, bool return_index, bool return_inverse, bool return_counts, const mlx_array fill_value /* may be null */ , const mlx_stream s)")
+
+(define-op mlx:unstack-axis mlx-ffi:mlx-unstack-axis
+  :returns (:arrays)
+  :args ((a :array)
+         (axis :int))
+  :stream t
+  :doc "C: int mlx_unstack_axis( mlx_vector_array* res, const mlx_array a, int axis, const mlx_stream s)")
+
+(define-op %unstack mlx-ffi:mlx-unstack
+  :returns (:arrays)
+  :args ((a :array))
+  :stream t
+  :doc "C: int mlx_unstack(mlx_vector_array* res, const mlx_array a, const mlx_stream s)")
 
 (define-op mlx:var-axes mlx-ffi:mlx-var-axes
   :returns (:array)
@@ -2213,6 +2452,14 @@
   :stream t
   :doc "C: int mlx_var( mlx_array* res, const mlx_array a, bool keepdims, int ddof, const mlx_stream s)")
 
+(define-op mlx:vecdot mlx-ffi:mlx-vecdot
+  :returns (:array)
+  :args ((a :array)
+         (b :array)
+         (axis :int :default -1))
+  :stream t
+  :doc "C: int mlx_vecdot( mlx_array* res, const mlx_array a, const mlx_array b, int axis, const mlx_stream s)")
+
 (define-op mlx:view mlx-ffi:mlx-view
   :returns (:array)
   :args ((a :array)
@@ -2235,7 +2482,14 @@
   :stream t
   :doc "C: int mlx_zeros( mlx_array* res, const int* shape, size_t shape_num, mlx_dtype dtype, const mlx_stream s)")
 
-(define-op mlx:zeros-like mlx-ffi:mlx-zeros-like
+(define-op mlx:zeros-like mlx-ffi:mlx-zeros-like-dtype
+  :returns (:array)
+  :args ((a :array)
+         (dtype :dtype :computed (dtype-of a)))
+  :stream t
+  :doc "C: int mlx_zeros_like_dtype( mlx_array* res, const mlx_array a, mlx_dtype dtype, const mlx_stream s)")
+
+(define-op %zeros-like mlx-ffi:mlx-zeros-like
   :returns (:array)
   :args ((a :array))
   :stream t
@@ -2443,11 +2697,55 @@
     (null (%concatenate arrays :stream stream))
     (integer (mlx:concatenate-axis arrays axis :stream stream))))
 
+(defun mlx:count-nonzero (a &key (axis nil) (keepdims nil) stream)
+  "Dispatches on axis: nil -> mlx_count_nonzero, int -> mlx_count_nonzero_axis, list -> mlx_count_nonzero_axes."
+  (etypecase axis
+    (null (%count-nonzero a :keepdims keepdims :stream stream))
+    (integer (mlx:count-nonzero-axis a axis :keepdims keepdims :stream stream))
+    (list (mlx:count-nonzero-axes a axis :keepdims keepdims :stream stream))))
+
+(defun mlx:cummax (a axis &key (reverse nil) (inclusive t) stream)
+  "Dispatches on axis: nil -> mlx_cummax, int -> mlx_cummax_axis."
+  (etypecase axis
+    (null (%cummax a :reverse reverse :inclusive inclusive :stream stream))
+    (integer (mlx:cummax-axis a axis :reverse reverse :inclusive inclusive :stream stream))))
+
+(defun mlx:cummin (a axis &key (reverse nil) (inclusive t) stream)
+  "Dispatches on axis: nil -> mlx_cummin, int -> mlx_cummin_axis."
+  (etypecase axis
+    (null (%cummin a :reverse reverse :inclusive inclusive :stream stream))
+    (integer (mlx:cummin-axis a axis :reverse reverse :inclusive inclusive :stream stream))))
+
+(defun mlx:cumprod (a axis &key (reverse nil) (inclusive t) (dtype nil) stream)
+  "Dispatches on axis: nil -> mlx_cumprod, int -> mlx_cumprod_axis."
+  (etypecase axis
+    (null (%cumprod a :reverse reverse :inclusive inclusive :dtype dtype :stream stream))
+    (integer (mlx:cumprod-axis a axis :reverse reverse :inclusive inclusive :dtype dtype :stream stream))))
+
+(defun mlx:cumsum (a axis &key (reverse nil) (inclusive t) (dtype nil) stream)
+  "Dispatches on axis: nil -> mlx_cumsum, int -> mlx_cumsum_axis."
+  (etypecase axis
+    (null (%cumsum a :reverse reverse :inclusive inclusive :dtype dtype :stream stream))
+    (integer (mlx:cumsum-axis a axis :reverse reverse :inclusive inclusive :dtype dtype :stream stream))))
+
 (defun mlx:expand-dims (a axis &key stream)
   "Dispatches on axis: int -> mlx_expand_dims, list -> mlx_expand_dims_axes."
   (etypecase axis
     (integer (%expand-dims a axis :stream stream))
     (list (mlx:expand-dims-axes a axis :stream stream))))
+
+(defun mlx:flip (a &key (axis nil) stream)
+  "Dispatches on axis: nil -> mlx_flip, int -> mlx_flip_axis, list -> mlx_flip_axes."
+  (etypecase axis
+    (null (%flip a :stream stream))
+    (integer (mlx:flip-axis a axis :stream stream))
+    (list (mlx:flip-axes a axis :stream stream))))
+
+(defun mlx:logcumsumexp (a axis &key (reverse nil) (inclusive t) stream)
+  "Dispatches on axis: nil -> mlx_logcumsumexp, int -> mlx_logcumsumexp_axis."
+  (etypecase axis
+    (null (%logcumsumexp a :reverse reverse :inclusive inclusive :stream stream))
+    (integer (mlx:logcumsumexp-axis a axis :reverse reverse :inclusive inclusive :stream stream))))
 
 (defun mlx:logsumexp (a &key (axis nil) (keepdims nil) stream)
   "Dispatches on axis: nil -> mlx_logsumexp, int -> mlx_logsumexp_axis, list -> mlx_logsumexp_axes."
@@ -2469,6 +2767,13 @@
     (null (%mean a :keepdims keepdims :stream stream))
     (integer (mlx:mean-axis a axis :keepdims keepdims :stream stream))
     (list (mlx:mean-axes a axis :keepdims keepdims :stream stream))))
+
+(defun mlx:median (a axis &key (keepdims nil) stream)
+  "Dispatches on axis: nil -> mlx_median, int -> mlx_median_axis, list -> mlx_median_axes."
+  (etypecase axis
+    (null (%median a :keepdims keepdims :stream stream))
+    (integer (mlx:median-axis a axis :keepdims keepdims :stream stream))
+    (list (mlx:median-axes a axis :keepdims keepdims :stream stream))))
 
 (defun mlx:min (a &key (axis nil) (keepdims nil) stream)
   "Dispatches on axis: nil -> mlx_min, int -> mlx_min_axis, list -> mlx_min_axes."
@@ -2560,6 +2865,12 @@
   (etypecase axes
     (null (%transpose a :stream stream))
     (list (mlx:transpose-axes a axes :stream stream))))
+
+(defun mlx:unstack (a &key (axis 0) stream)
+  "Dispatches on axis: nil -> mlx_unstack, int -> mlx_unstack_axis."
+  (etypecase axis
+    (null (%unstack a :stream stream))
+    (integer (mlx:unstack-axis a axis :stream stream))))
 
 (defun mlx:var (a &key (axis nil) (keepdims nil) (ddof 0) stream)
   "Dispatches on axis: nil -> mlx_var, int -> mlx_var_axis, list -> mlx_var_axes."

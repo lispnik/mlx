@@ -15,7 +15,11 @@
       (is (close-to (linalg:solve a (mx:from-lisp '(2.0 4.0))) '(1 1)))
       (is (close-to (linalg:pinv a) '((0.5 0) (0 0.25))))
       (is (close-to (linalg:tri-inv a) '((0.5 0) (0 0.25))))
-      (is (close-to (linalg:solve-triangular a (mx:from-lisp '(2.0 4.0))) '(1 1))))))
+      (is (close-to (linalg:solve-triangular a (mx:from-lisp '(2.0 4.0))) '(1 1)))
+      (is (close-to (linalg:det (mx:from-lisp '((2.0 1.0) (1.0 3.0)))) 5))
+      (multiple-value-bind (sign logabs) (linalg:slogdet (mx:from-lisp '((-2.0 0.0) (0.0 3.0))))
+        (is (close-to sign -1))
+        (is (close-to logabs (log 6)))))))
 
 (test decompositions
   (on-cpu

@@ -101,8 +101,15 @@ singleton group is returned)."
            "distributed init")
     (%wrap-mlx-distributed-group (cffi:mem-ref res :pointer))))
 
-(defun mlx.distributed:group-rank (group) (ffi:mlx-distributed-group-rank (ptr group)))
-(defun mlx.distributed:group-size (group) (ffi:mlx-distributed-group-size (ptr group)))
+(defun mlx.distributed:group-rank (group)
+  (cffi:with-foreign-object (i :int)
+    (check (ffi:mlx-distributed-group-get-rank i (ptr group)) "group rank")
+    (cffi:mem-ref i :int)))
+
+(defun mlx.distributed:group-size (group)
+  (cffi:with-foreign-object (i :int)
+    (check (ffi:mlx-distributed-group-get-size i (ptr group)) "group size")
+    (cffi:mem-ref i :int)))
 
 (defun mlx.distributed:group-split (group color &key (key -1))
   "Split GROUP into subgroups of processes sharing COLOR, ordered by KEY."

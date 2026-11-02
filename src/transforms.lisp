@@ -143,6 +143,16 @@ to tree arguments and rebuilding the result tree."
 (defvar *compile-id-cell* (list 0)
   "Counter giving each compiled function a unique cache id.")
 
+(defun call-with-compile-cache (function)
+  "Call FUNCTION with a handle on MLX's global compile cache (mlx-c 0.8
+passes it explicitly to the cache operations)."
+  (cffi:with-foreign-object (res :pointer)
+    (setf (cffi:mem-ref res :pointer) (ffi:mlx-compile-cache-new))
+    (unwind-protect
+         (progn (check (ffi:mlx-detail-compile-cache res) "compile cache")
+                (funcall function (cffi:mem-ref res :pointer)))
+      (ffi:mlx-compile-cache-free (cffi:mem-ref res :pointer)))))
+
 (defun mlx:compile (function &key shapeless)
   "Return a compiled version of FUNCTION: the graph traced on the first call
 (and whenever input shapes or dtypes change, unless SHAPELESS) is optimized
@@ -159,7 +169,8 @@ take only arrays (or trees of arrays); numbers become array inputs."
          (handle (%make-mlx-closure
                   (cons compiled (lambda (p)
                                    (ffi:mlx-closure-free p)
-                                   (ffi:mlx-detail-compile-erase fun-id))))))
+                                   (call-with-compile-cache
+                                    (lambda (cache) (ffi:mlx-detail-compile-erase cache fun-id))))))))
     (register-handle handle)
     ;; owned by the returned function, whatever scope we are in
     (mlx:persist handle (tree-closure-closure tc))
@@ -209,5 +220,5 @@ All arguments are lists of arrays."
   mode)
 
 (defun mlx:clear-compile-cache ()
-  (check (ffi:mlx-detail-compile-clear-cache))
+  (call-with-compile-cache (lambda (cache) (check (ffi:mlx-detail-compile-clear-cache cache))))
   nil)

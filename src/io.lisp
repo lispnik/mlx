@@ -154,10 +154,13 @@ METADATA maps keys to strings, lists of strings, or arrays/numbers."
   (cffi:foreign-funcall "memcpy" :pointer dst :pointer src :size n :pointer))
 
 (defun io-read-into (io dest n offset)
-  (if (> (+ offset n) (octet-io-length io))
-      (setf (octet-io-good io) nil)
-      (cffi:with-pointer-to-vector-data (src (octet-io-data io))
-        (memcpy dest (cffi:inc-pointer src offset) n))))
+  "Copy N bytes at OFFSET to DEST; return the count copied (0 if short)."
+  (cond ((> (+ offset n) (octet-io-length io))
+         (setf (octet-io-good io) nil)
+         0)
+        (t (cffi:with-pointer-to-vector-data (src (octet-io-data io))
+             (memcpy dest (cffi:inc-pointer src offset) n))
+           n)))
 
 (cffi:defcallback io-is-open :bool ((desc :pointer))
   (declare (ignore desc))
@@ -169,7 +172,10 @@ METADATA maps keys to strings, lists of strings, or arrays/numbers."
 (cffi:defcallback io-tell :size ((desc :pointer))
   (handler-case (with-io (io desc) (octet-io-pos io)) (error () 0)))
 
-(cffi:defcallback io-seek :void ((desc :pointer) (offset :int64) (whence :int))
+;;; mlx-c checks these results: SEEK fails when negative, and READ,
+;;; READ-AT-OFFSET and WRITE fail unless they return N.
+
+(cffi:defcallback io-seek :int ((desc :pointer) (offset :int64) (whence :int))
   (handler-case
       (with-io (io desc)
         (let ((pos (+ offset (case whence
@@ -177,21 +183,23 @@ METADATA maps keys to strings, lists of strings, or arrays/numbers."
                                (1 (octet-io-pos io))
                                (2 (octet-io-length io))
                                (t 0)))))
-          (if (<= 0 pos) (setf (octet-io-pos io) pos) (setf (octet-io-good io) nil))))
-    (error () nil)))
+          (cond ((<= 0 pos) (setf (octet-io-pos io) pos) 0)
+                (t (setf (octet-io-good io) nil) -1))))
+    (error () -1)))
 
-(cffi:defcallback io-read :void ((desc :pointer) (data :pointer) (n :size))
+(cffi:defcallback io-read :size ((desc :pointer) (data :pointer) (n :size))
   (handler-case
       (with-io (io desc)
-        (io-read-into io data n (octet-io-pos io))
-        (incf (octet-io-pos io) n))
-    (error () nil)))
+        (let ((read (io-read-into io data n (octet-io-pos io))))
+          (incf (octet-io-pos io) read)
+          read))
+    (error () 0)))
 
-(cffi:defcallback io-read-at-offset :void ((desc :pointer) (data :pointer) (n :size) (offset :size))
+(cffi:defcallback io-read-at-offset :size ((desc :pointer) (data :pointer) (n :size) (offset :size))
   (handler-case (with-io (io desc) (io-read-into io data n offset))
-    (error () nil)))
+    (error () 0)))
 
-(cffi:defcallback io-write :void ((desc :pointer) (data :pointer) (n :size))
+(cffi:defcallback io-write :size ((desc :pointer) (data :pointer) (n :size))
   (handler-case
       (with-io (io desc)
         (let ((end (+ (octet-io-pos io) n)))
@@ -199,8 +207,9 @@ METADATA maps keys to strings, lists of strings, or arrays/numbers."
           (cffi:with-pointer-to-vector-data (dst (octet-io-data io))
             (memcpy (cffi:inc-pointer dst (octet-io-pos io)) data n))
           (setf (octet-io-pos io) end
-                (octet-io-length io) (max end (octet-io-length io)))))
-    (error () nil)))
+                (octet-io-length io) (max end (octet-io-length io)))
+          n))
+    (error () 0)))
 
 (cffi:defcallback io-label :pointer ((desc :pointer))
   (handler-case (with-io (io desc) (octet-io-label io)) (error () (cffi:null-pointer))))

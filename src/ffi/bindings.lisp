@@ -18,6 +18,7 @@
 (cffi:defctype mlx-closure-custom :pointer "struct mlx_closure_custom { void* ctx; }")
 (cffi:defctype mlx-closure-custom-jvp :pointer "struct mlx_closure_custom_jvp { void* ctx; }")
 (cffi:defctype mlx-closure-custom-vmap :pointer "struct mlx_closure_custom_vmap { void* ctx; }")
+(cffi:defctype mlx-compile-cache :pointer "struct mlx_compile_cache { void* ctx; }")
 (cffi:defctype mlx-device :pointer "struct mlx_device { void* ctx; }")
 (cffi:defctype mlx-device-info :pointer "struct mlx_device_info { void* ctx; }")
 (cffi:defctype mlx-distributed-group :pointer "struct mlx_distributed_group { void* ctx; }")
@@ -34,11 +35,13 @@
 (cffi:defctype mlx-map-string-to-array :pointer "struct mlx_map_string_to_array { void* ctx; }")
 (cffi:defctype mlx-map-string-to-string :pointer "struct mlx_map_string_to_string { void* ctx; }")
 (cffi:defctype mlx-stream :pointer "struct mlx_stream { void* ctx; }")
+(cffi:defctype mlx-stream-thread-local :pointer "struct mlx_stream_thread_local { void* ctx; }")
 (cffi:defctype mlx-string :pointer "struct mlx_string { void* ctx; }")
 (cffi:defctype mlx-vector-array :pointer "struct mlx_vector_array { void* ctx; }")
 (cffi:defctype mlx-vector-vector-array :pointer "struct mlx_vector_vector_array { void* ctx; }")
 (cffi:defctype mlx-vector-int :pointer "struct mlx_vector_int { void* ctx; }")
 (cffi:defctype mlx-vector-string :pointer "struct mlx_vector_string { void* ctx; }")
+(cffi:defctype mlx-vector-stream :pointer "struct mlx_vector_stream { void* ctx; }")
 
 ;;; Two-word iterators {ctx, map_ctx}.  Returned in x0/x1; we only receive
 ;;; x0 (ctx).  map_ctx is always the ctx of the map the iterator was made
@@ -725,6 +728,13 @@ C: int _mlx_array_is_col_contiguous(bool* res, const mlx_array arr)"
 ;;; ------------------------------------------------------------------
 ;;; compile.h
 
+(define-mlx-function ("mlx_compile_cache_new" mlx-compile-cache-new) mlx-compile-cache
+  "C: mlx_compile_cache mlx_compile_cache_new()")
+
+(define-mlx-function ("mlx_compile_cache_free" mlx-compile-cache-free) :int
+  "C: int mlx_compile_cache_free(mlx_compile_cache cache)"
+  (cache mlx-compile-cache))
+
 (define-mlx-function ("mlx_compile" mlx-compile) :int
   "C: int mlx_compile(mlx_closure* res, const mlx_closure fun, bool shapeless)"
   (res :pointer)
@@ -740,11 +750,17 @@ C: int _mlx_array_is_col_contiguous(bool* res, const mlx_array arr)"
   (constants :pointer)
   (constants-num :size))
 
+(define-mlx-function ("mlx_detail_compile_cache" mlx-detail-compile-cache) :int
+  "C: int mlx_detail_compile_cache(mlx_compile_cache* res)"
+  (res :pointer))
+
 (define-mlx-function ("mlx_detail_compile_clear_cache" mlx-detail-compile-clear-cache) :int
-  "C: int mlx_detail_compile_clear_cache(void)")
+  "C: int mlx_detail_compile_clear_cache(const mlx_compile_cache cache)"
+  (cache mlx-compile-cache))
 
 (define-mlx-function ("mlx_detail_compile_erase" mlx-detail-compile-erase) :int
-  "C: int mlx_detail_compile_erase(uintptr_t fun_id)"
+  "C: int mlx_detail_compile_erase(const mlx_compile_cache cache, uintptr_t fun_id)"
+  (cache mlx-compile-cache)
   (fun-id :uintptr))
 
 (define-mlx-function ("mlx_disable_compile" mlx-disable-compile) :int
@@ -989,16 +1005,34 @@ C: int mlx_distributed_init( mlx_distributed_group* res, bool strict, const char
   (strict :bool)
   (bk :string))
 
-(define-mlx-function ("mlx_distributed_group_rank" mlx-distributed-group-rank) :int
+(define-mlx-function ("mlx_distributed_init_with_all_gather" mlx-distributed-init-with-all-gather) :int
+  "Initialize JACCL with a custom metadata all-gather callback. `bk` must be `jaccl`. The synchronous callback reads `n_bytes` from `src` and fills `size * n_bytes` in `dst`, ordered by `rank`. Buffers are borrowed. The callback returns zero on success, nonzero on failure. If a `jaccl` group is already cached, it is returned and `all_gather` is never called: the callback is dropped and, with `dtor`, `payload` is destroyed before this function returns. Call `mlx_distributed_clear_backends()` first to initialize with a new callback. With `dtor`, ownership of `payload` transfers on entry, including failure. Destruction occurs once after all references are released. Cached or live groups may delay it. Without `dtor`, `payload` is borrowed and must remain valid while the callback is retained. Returns zero on success, nonzero on error. `res` is unchanged on failure.
+
+C: int mlx_distributed_init_with_all_gather( mlx_distributed_group* res, bool strict, const char* bk, mlx_distributed_all_gather_fn all_gather, void* payload, void (*dtor)(void*))"
+  (res :pointer)
+  (strict :bool)
+  (bk :string)
+  (all-gather :pointer)
+  (payload :pointer)
+  (dtor :pointer))
+
+(define-mlx-function ("mlx_distributed_clear_backends" mlx-distributed-clear-backends) :int
+  "Clear the distributed backend cache.
+
+C: int mlx_distributed_clear_backends(void)")
+
+(define-mlx-function ("mlx_distributed_group_get_rank" mlx-distributed-group-get-rank) :int
   "Get the rank.
 
-C: int mlx_distributed_group_rank(mlx_distributed_group group)"
+C: int mlx_distributed_group_get_rank(int* res, mlx_distributed_group group)"
+  (res :pointer)
   (group mlx-distributed-group))
 
-(define-mlx-function ("mlx_distributed_group_size" mlx-distributed-group-size) :int
+(define-mlx-function ("mlx_distributed_group_get_size" mlx-distributed-group-get-size) :int
   "Get the group size.
 
-C: int mlx_distributed_group_size(mlx_distributed_group group)"
+C: int mlx_distributed_group_get_size(int* res, mlx_distributed_group group)"
+  (res :pointer)
   (group mlx-distributed-group))
 
 (define-mlx-function ("mlx_distributed_group_split" mlx-distributed-group-split) :int
@@ -1090,6 +1124,13 @@ C: void mlx_set_error_handler( mlx_error_handler_func handler, void* data, void 
 ;;; ------------------------------------------------------------------
 ;;; fast.h
 
+(define-mlx-function ("mlx_fast_cross_entropy" mlx-fast-cross-entropy) :int
+  "C: int mlx_fast_cross_entropy( mlx_array* res, const mlx_array logits, const mlx_array targets, const mlx_stream s)"
+  (res :pointer)
+  (logits mlx-array)
+  (targets mlx-array)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_fast_cuda_kernel_config_new" mlx-fast-cuda-kernel-config-new) mlx-fast-cuda-kernel-config
   "C: mlx_fast_cuda_kernel_config mlx_fast_cuda_kernel_config_new(void)")
 
@@ -1167,6 +1208,18 @@ C: void mlx_set_error_handler( mlx_error_handler_func handler, void* data, void 
   (inputs mlx-vector-array)
   (config mlx-fast-cuda-kernel-config)
   (stream mlx-stream))
+
+(define-mlx-function ("mlx_fast_gated_delta_update" mlx-fast-gated-delta-update) :int
+  "C: int mlx_fast_gated_delta_update( mlx_vector_array* res, const mlx_array queries, const mlx_array keys, const mlx_array values, const mlx_array gates, const mlx_array beta_, const mlx_array initial_state /* may be null */ , const mlx_array mask /* may be null */ , const mlx_stream s)"
+  (res :pointer)
+  (queries mlx-array)
+  (keys mlx-array)
+  (values mlx-array)
+  (gates mlx-array)
+  (beta- mlx-array)
+  (initial-state mlx-array)
+  (mask mlx-array)
+  (s mlx-stream))
 
 (define-mlx-function ("mlx_fast_layer_norm" mlx-fast-layer-norm) :int
   "C: int mlx_fast_layer_norm( mlx_array* res, const mlx_array x, const mlx_array weight /* may be null */ , const mlx_array bias /* may be null */ , float eps, const mlx_stream s)"
@@ -1288,7 +1341,7 @@ C: void mlx_set_error_handler( mlx_error_handler_func handler, void* data, void 
   (s mlx-stream))
 
 (define-mlx-function ("mlx_fast_scaled_dot_product_attention" mlx-fast-scaled-dot-product-attention) :int
-  "C: int mlx_fast_scaled_dot_product_attention( mlx_array* res, const mlx_array queries, const mlx_array keys, const mlx_array values, float scale, const char* mask_mode, const mlx_array mask_arr /* may be null */ , const mlx_array sinks /* may be null */ , const mlx_stream s)"
+  "C: int mlx_fast_scaled_dot_product_attention( mlx_array* res, const mlx_array queries, const mlx_array keys, const mlx_array values, float scale, const char* mask_mode, const mlx_array mask_arr /* may be null */ , const mlx_array sinks /* may be null */ , bool force_fused, const mlx_stream s)"
   (res :pointer)
   (queries mlx-array)
   (keys mlx-array)
@@ -1297,6 +1350,7 @@ C: void mlx_set_error_handler( mlx_error_handler_func handler, void* data, void 
   (mask-mode :string)
   (mask-arr mlx-array)
   (sinks mlx-array)
+  (force-fused :bool)
   (s mlx-stream))
 
 ;;; ------------------------------------------------------------------
@@ -1712,6 +1766,12 @@ C: int mlx_io_writer_free(mlx_io_writer io)"
   (axis :int)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_linalg_det" mlx-linalg-det) :int
+  "C: int mlx_linalg_det(mlx_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_linalg_eig" mlx-linalg-eig) :int
   "C: int mlx_linalg_eig( mlx_array* res_0, mlx_array* res_1, const mlx_array a, const mlx_stream s)"
   (res-0 :pointer)
@@ -1796,6 +1856,13 @@ C: int mlx_io_writer_free(mlx_io_writer io)"
 
 (define-mlx-function ("mlx_linalg_qr" mlx-linalg-qr) :int
   "C: int mlx_linalg_qr( mlx_array* res_0, mlx_array* res_1, const mlx_array a, const mlx_stream s)"
+  (res-0 :pointer)
+  (res-1 :pointer)
+  (a mlx-array)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_linalg_slogdet" mlx-linalg-slogdet) :int
+  "C: int mlx_linalg_slogdet( mlx_array* res_0, mlx_array* res_1, const mlx_array a, const mlx_stream s)"
   (res-0 :pointer)
   (res-1 :pointer)
   (a mlx-array)
@@ -1951,6 +2018,11 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   "C: int mlx_get_active_memory(size_t* res)"
   (res :pointer))
 
+(define-mlx-function ("mlx_get_array_buffer_size" mlx-get-array-buffer-size) :int
+  "C: int mlx_get_array_buffer_size(size_t* res, const mlx_vector_array arrays)"
+  (res :pointer)
+  (arrays mlx-vector-array))
+
 (define-mlx-function ("mlx_get_cache_memory" mlx-get-cache-memory) :int
   "C: int mlx_get_cache_memory(size_t* res)"
   (res :pointer))
@@ -1984,9 +2056,17 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
 ;;; ------------------------------------------------------------------
 ;;; metal.h
 
+(define-mlx-function ("mlx_metal_get_metallib_path" mlx-metal-get-metallib-path) :int
+  "C: int mlx_metal_get_metallib_path(mlx_string* res)"
+  (res :pointer))
+
 (define-mlx-function ("mlx_metal_is_available" mlx-metal-is-available) :int
   "C: int mlx_metal_is_available(bool* res)"
   (res :pointer))
+
+(define-mlx-function ("mlx_metal_set_metallib_path" mlx-metal-set-metallib-path) :int
+  "C: int mlx_metal_set_metallib_path(const char* path)"
+  (path :string))
 
 (define-mlx-function ("mlx_metal_start_capture" mlx-metal-start-capture) :int
   "C: int mlx_metal_start_capture(const char* path)"
@@ -2464,8 +2544,49 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (a mlx-array)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_count_nonzero_axis" mlx-count-nonzero-axis) :int
+  "C: int mlx_count_nonzero_axis( mlx_array* res, const mlx_array a, int axis, bool keepdims, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axis :int)
+  (keepdims :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_count_nonzero_axes" mlx-count-nonzero-axes) :int
+  "C: int mlx_count_nonzero_axes( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, bool keepdims, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axes :pointer)
+  (axes-num :size)
+  (keepdims :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_count_nonzero" mlx-count-nonzero) :int
+  "C: int mlx_count_nonzero( mlx_array* res, const mlx_array a, bool keepdims, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (keepdims :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_cummax_axis" mlx-cummax-axis) :int
+  "C: int mlx_cummax_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axis :int)
+  (reverse :bool)
+  (inclusive :bool)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_cummax" mlx-cummax) :int
-  "C: int mlx_cummax( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
+  "C: int mlx_cummax( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (reverse :bool)
+  (inclusive :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_cummin_axis" mlx-cummin-axis) :int
+  "C: int mlx_cummin_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (axis :int)
@@ -2474,30 +2595,49 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (s mlx-stream))
 
 (define-mlx-function ("mlx_cummin" mlx-cummin) :int
-  "C: int mlx_cummin( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
+  "C: int mlx_cummin( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (reverse :bool)
+  (inclusive :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_cumprod_axis" mlx-cumprod-axis) :int
+  "C: int mlx_cumprod_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (axis :int)
   (reverse :bool)
   (inclusive :bool)
+  (dtype mlx-optional-dtype)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_cumprod" mlx-cumprod) :int
-  "C: int mlx_cumprod( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
+  "C: int mlx_cumprod( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (reverse :bool)
+  (inclusive :bool)
+  (dtype mlx-optional-dtype)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_cumsum_axis" mlx-cumsum-axis) :int
+  "C: int mlx_cumsum_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (axis :int)
   (reverse :bool)
   (inclusive :bool)
+  (dtype mlx-optional-dtype)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_cumsum" mlx-cumsum) :int
-  "C: int mlx_cumsum( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
+  "C: int mlx_cumsum( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, mlx_optional_dtype dtype, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
-  (axis :int)
   (reverse :bool)
   (inclusive :bool)
+  (dtype mlx-optional-dtype)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_degrees" mlx-degrees) :int
@@ -2539,6 +2679,14 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (offset :int)
   (axis1 :int)
   (axis2 :int)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_diff" mlx-diff) :int
+  "C: int mlx_diff( mlx_array* res, const mlx_array a, int n, int axis, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (n :int)
+  (axis :int)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_divide" mlx-divide) :int
@@ -2625,6 +2773,27 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (end-axis :int)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_flip_axes" mlx-flip-axes) :int
+  "C: int mlx_flip_axes( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axes :pointer)
+  (axes-num :size)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_flip_axis" mlx-flip-axis) :int
+  "C: int mlx_flip_axis( mlx_array* res, const mlx_array a, int axis, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axis :int)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_flip" mlx-flip) :int
+  "C: int mlx_flip(mlx_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_floor" mlx-floor) :int
   "C: int mlx_floor(mlx_array* res, const mlx_array a, const mlx_stream s)"
   (res :pointer)
@@ -2694,7 +2863,7 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (s mlx-stream))
 
 (define-mlx-function ("mlx_gather_qmm" mlx-gather-qmm) :int
-  "C: int mlx_gather_qmm( mlx_array* res, const mlx_array x, const mlx_array w, const mlx_array scales, const mlx_array biases /* may be null */ , const mlx_array lhs_indices /* may be null */ , const mlx_array rhs_indices /* may be null */ , bool transpose, mlx_optional_int group_size, mlx_optional_int bits, const char* mode, bool sorted_indices, const mlx_stream s)"
+  "C: int mlx_gather_qmm( mlx_array* res, const mlx_array x, const mlx_array w, const mlx_array scales, const mlx_array biases /* may be null */ , const mlx_array lhs_indices /* may be null */ , const mlx_array rhs_indices /* may be null */ , bool transpose, mlx_optional_int group_size, mlx_optional_int bits, const char* mode, const mlx_array global_scale /* may be null */ , bool sorted_indices, const mlx_stream s)"
   (res :pointer)
   (x mlx-array)
   (w mlx-array)
@@ -2706,6 +2875,23 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (group-size mlx-optional-int)
   (bits mlx-optional-int)
   (mode :string)
+  (global-scale mlx-array)
+  (sorted-indices :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_gather_qqmm" mlx-gather-qqmm) :int
+  "C: int mlx_gather_qqmm( mlx_array* res, const mlx_array x, const mlx_array w, const mlx_array scales_w /* may be null */ , const mlx_array lhs_indices /* may be null */ , const mlx_array rhs_indices /* may be null */ , mlx_optional_int group_size, mlx_optional_int bits, const char* mode, const mlx_array global_scale_x /* may be null */ , const mlx_array global_scale_w /* may be null */ , bool sorted_indices, const mlx_stream s)"
+  (res :pointer)
+  (x mlx-array)
+  (w mlx-array)
+  (scales-w mlx-array)
+  (lhs-indices mlx-array)
+  (rhs-indices mlx-array)
+  (group-size mlx-optional-int)
+  (bits mlx-optional-int)
+  (mode :string)
+  (global-scale-x mlx-array)
+  (global-scale-w mlx-array)
   (sorted-indices :bool)
   (s mlx-stream))
 
@@ -2830,6 +3016,16 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (b mlx-array)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_linspace_endpoint" mlx-linspace-endpoint) :int
+  "C: int mlx_linspace_endpoint( mlx_array* res, double start, double stop, int num, bool endpoint, mlx_dtype dtype, const mlx_stream s)"
+  (res :pointer)
+  (start :double)
+  (stop :double)
+  (num :int)
+  (endpoint :bool)
+  (dtype mlx-dtype)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_linspace" mlx-linspace) :int
   "C: int mlx_linspace( mlx_array* res, double start, double stop, int num, mlx_dtype dtype, const mlx_stream s)"
   (res :pointer)
@@ -2870,11 +3066,19 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (b mlx-array)
   (s mlx-stream))
 
-(define-mlx-function ("mlx_logcumsumexp" mlx-logcumsumexp) :int
-  "C: int mlx_logcumsumexp( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
+(define-mlx-function ("mlx_logcumsumexp_axis" mlx-logcumsumexp-axis) :int
+  "C: int mlx_logcumsumexp_axis( mlx_array* res, const mlx_array a, int axis, bool reverse, bool inclusive, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (axis :int)
+  (reverse :bool)
+  (inclusive :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_logcumsumexp" mlx-logcumsumexp) :int
+  "C: int mlx_logcumsumexp( mlx_array* res, const mlx_array a, bool reverse, bool inclusive, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (reverse :bool)
   (inclusive :bool)
   (s mlx-stream))
@@ -2894,6 +3098,13 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
 
 (define-mlx-function ("mlx_logical_or" mlx-logical-or) :int
   "C: int mlx_logical_or( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (b mlx-array)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_logical_xor" mlx-logical-xor) :int
+  "C: int mlx_logical_xor( mlx_array* res, const mlx_array a, const mlx_array b, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (b mlx-array)
@@ -2936,6 +3147,12 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (res :pointer)
   (a mlx-array)
   (b mlx-array)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_matrix_transpose" mlx-matrix-transpose) :int
+  "C: int mlx_matrix_transpose(mlx_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_max_axes" mlx-max-axes) :int
@@ -2993,12 +3210,27 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (keepdims :bool)
   (s mlx-stream))
 
-(define-mlx-function ("mlx_median" mlx-median) :int
-  "C: int mlx_median( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, bool keepdims, const mlx_stream s)"
+(define-mlx-function ("mlx_median_axes" mlx-median-axes) :int
+  "C: int mlx_median_axes( mlx_array* res, const mlx_array a, const int* axes, size_t axes_num, bool keepdims, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (axes :pointer)
   (axes-num :size)
+  (keepdims :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_median_axis" mlx-median-axis) :int
+  "C: int mlx_median_axis( mlx_array* res, const mlx_array a, int axis, bool keepdims, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axis :int)
+  (keepdims :bool)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_median" mlx-median) :int
+  "C: int mlx_median( mlx_array* res, const mlx_array a, bool keepdims, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (keepdims :bool)
   (s mlx-stream))
 
@@ -3096,6 +3328,13 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (dtype mlx-dtype)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_ones_like_dtype" mlx-ones-like-dtype) :int
+  "C: int mlx_ones_like_dtype( mlx_array* res, const mlx_array a, mlx_dtype dtype, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (dtype mlx-dtype)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_ones_like" mlx-ones-like) :int
   "C: int mlx_ones_like(mlx_array* res, const mlx_array a, const mlx_stream s)"
   (res :pointer)
@@ -3145,6 +3384,12 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (res :pointer)
   (a mlx-array)
   (kth :int)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_positive" mlx-positive) :int
+  "C: int mlx_positive(mlx_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_power" mlx-power) :int
@@ -3420,6 +3665,14 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (indices mlx-array)
   (updates mlx-array)
   (axis :int)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_searchsorted" mlx-searchsorted) :int
+  "C: int mlx_searchsorted( mlx_array* res, const mlx_array sorted_sequence, const mlx_array values, const char* side, const mlx_stream s)"
+  (res :pointer)
+  (sorted-sequence mlx-array)
+  (values mlx-array)
+  (side :string)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_segmented_mm" mlx-segmented-mm) :int
@@ -3807,14 +4060,20 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (k :int)
   (s mlx-stream))
 
-(define-mlx-function ("mlx_trace" mlx-trace) :int
-  "C: int mlx_trace( mlx_array* res, const mlx_array a, int offset, int axis1, int axis2, mlx_dtype dtype, const mlx_stream s)"
+(define-mlx-function ("mlx_trace_axes" mlx-trace-axes) :int
+  "C: int mlx_trace_axes( mlx_array* res, const mlx_array a, int offset, int axis1, int axis2, mlx_dtype dtype, const mlx_stream s)"
   (res :pointer)
   (a mlx-array)
   (offset :int)
   (axis1 :int)
   (axis2 :int)
   (dtype mlx-dtype)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_trace" mlx-trace) :int
+  "C: int mlx_trace(mlx_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_transpose_axes" mlx-transpose-axes) :int
@@ -3854,6 +4113,12 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (k :int)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_trunc" mlx-trunc) :int
+  "C: int mlx_trunc(mlx_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_unflatten" mlx-unflatten) :int
   "C: int mlx_unflatten( mlx_array* res, const mlx_array a, int axis, const int* shape, size_t shape_num, const mlx_stream s)"
   (res :pointer)
@@ -3861,6 +4126,30 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (axis :int)
   (shape :pointer)
   (shape-num :size)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_unique" mlx-unique) :int
+  "C: int mlx_unique( mlx_vector_array* res, const mlx_array a, int size, bool return_index, bool return_inverse, bool return_counts, const mlx_array fill_value /* may be null */ , const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (size :int)
+  (return-index :bool)
+  (return-inverse :bool)
+  (return-counts :bool)
+  (fill-value mlx-array)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_unstack_axis" mlx-unstack-axis) :int
+  "C: int mlx_unstack_axis( mlx_vector_array* res, const mlx_array a, int axis, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (axis :int)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_unstack" mlx-unstack) :int
+  "C: int mlx_unstack(mlx_vector_array* res, const mlx_array a, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (s mlx-stream))
 
 (define-mlx-function ("mlx_var_axes" mlx-var-axes) :int
@@ -3890,6 +4179,14 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (ddof :int)
   (s mlx-stream))
 
+(define-mlx-function ("mlx_vecdot" mlx-vecdot) :int
+  "C: int mlx_vecdot( mlx_array* res, const mlx_array a, const mlx_array b, int axis, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
+  (b mlx-array)
+  (axis :int)
+  (s mlx-stream))
+
 (define-mlx-function ("mlx_view" mlx-view) :int
   "C: int mlx_view( mlx_array* res, const mlx_array a, mlx_dtype dtype, const mlx_stream s)"
   (res :pointer)
@@ -3910,6 +4207,13 @@ C: int mlx_map_string_to_string_iterator_next( const char** key, const char** va
   (res :pointer)
   (shape :pointer)
   (shape-num :size)
+  (dtype mlx-dtype)
+  (s mlx-stream))
+
+(define-mlx-function ("mlx_zeros_like_dtype" mlx-zeros-like-dtype) :int
+  "C: int mlx_zeros_like_dtype( mlx_array* res, const mlx_array a, mlx_dtype dtype, const mlx_stream s)"
+  (res :pointer)
+  (a mlx-array)
   (dtype mlx-dtype)
   (s mlx-stream))
 
@@ -4105,6 +4409,44 @@ C: mlx_stream mlx_stream_new(void)")
 C: mlx_stream mlx_stream_new_device(mlx_device dev)"
   (dev mlx-device))
 
+(define-mlx-function ("mlx_stream_new_thread_unsafe" mlx-stream-new-thread-unsafe) mlx-stream
+  "Returns a new stream on a device that can be used from any thread. Streams are otherwise thread affine: a stream's GPU command encoder is registered per thread, so evaluating on a stream from a thread other than the one that created it fails. Streams returned here are registered globally instead. MLX applies no synchronization to these streams -- it is the caller's responsibility to ensure there are no data races on them.
+
+C: mlx_stream mlx_stream_new_thread_unsafe(mlx_device dev)"
+  (dev mlx-device))
+
+(define-mlx-function ("mlx_stream_thread_local_new" mlx-stream-thread-local-new) mlx-stream-thread-local
+  "Returns a new per-thread stream on a device. Streams created this way are unique per thread: evaluating the same `mlx_stream_thread_local` from different threads yields distinct streams.
+
+C: mlx_stream_thread_local mlx_stream_thread_local_new(mlx_device dev)"
+  (dev mlx-device))
+
+(define-mlx-function ("mlx_stream_thread_local_set" mlx-stream-thread-local-set) :int
+  "Set a per-thread stream to the provided src stream.
+
+C: int mlx_stream_thread_local_set( mlx_stream_thread_local* tls, const mlx_stream_thread_local src)"
+  (tls :pointer)
+  (src mlx-stream-thread-local))
+
+(define-mlx-function ("mlx_stream_thread_local_free" mlx-stream-thread-local-free) :int
+  "Free a per-thread stream.
+
+C: int mlx_stream_thread_local_free(mlx_stream_thread_local tls)"
+  (tls mlx-stream-thread-local))
+
+(define-mlx-function ("mlx_stream_from_thread_local" mlx-stream-from-thread-local) :int
+  "Returns the concrete stream backing a per-thread stream on the current thread.
+
+C: int mlx_stream_from_thread_local( mlx_stream* res, const mlx_stream_thread_local tls)"
+  (res :pointer)
+  (tls mlx-stream-thread-local))
+
+(define-mlx-function ("mlx_get_streams" mlx-get-streams) :int
+  "Get the vector of available streams.
+
+C: int mlx_get_streams(mlx_vector_stream* res)"
+  (res :pointer))
+
 (define-mlx-function ("mlx_stream_set" mlx-stream-set) :int
   "Set stream to provided src stream.
 
@@ -4151,6 +4493,22 @@ C: int mlx_stream_get_index(int* index, mlx_stream stream)"
 
 C: int mlx_synchronize(mlx_stream stream)"
   (stream mlx-stream))
+
+(define-mlx-function ("mlx_synchronize_default" mlx-synchronize-default) :int
+  "Synchronize with the default stream.
+
+C: int mlx_synchronize_default(void)")
+
+(define-mlx-function ("mlx_synchronize_thread_local" mlx-synchronize-thread-local) :int
+  "Synchronize with the stream corresponding to the current thread.
+
+C: int mlx_synchronize_thread_local(mlx_stream_thread_local tls)"
+  (tls mlx-stream-thread-local))
+
+(define-mlx-function ("mlx_clear_streams" mlx-clear-streams) :int
+  "Destroy all streams created in the current thread.
+
+C: int mlx_clear_streams(void)")
 
 (define-mlx-function ("mlx_get_default_stream" mlx-get-default-stream) :int
   "Returns the default stream on the given device.
@@ -4499,6 +4857,59 @@ C: int mlx_string_free(mlx_string str)"
   (vec mlx-vector-string)
   (idx :size))
 
+(define-mlx-function ("mlx_vector_stream_new" mlx-vector-stream-new) mlx-vector-stream
+  "C: mlx_vector_stream mlx_vector_stream_new(void)")
+
+(define-mlx-function ("mlx_vector_stream_set" mlx-vector-stream-set) :int
+  "C: int mlx_vector_stream_set(mlx_vector_stream* vec, const mlx_vector_stream src)"
+  (vec :pointer)
+  (src mlx-vector-stream))
+
+(define-mlx-function ("mlx_vector_stream_free" mlx-vector-stream-free) :int
+  "C: int mlx_vector_stream_free(mlx_vector_stream vec)"
+  (vec mlx-vector-stream))
+
+(define-mlx-function ("mlx_vector_stream_new_data" mlx-vector-stream-new-data) mlx-vector-stream
+  "C: mlx_vector_stream mlx_vector_stream_new_data( const mlx_stream* data, size_t size)"
+  (data :pointer)
+  (size :size))
+
+(define-mlx-function ("mlx_vector_stream_new_value" mlx-vector-stream-new-value) mlx-vector-stream
+  "C: mlx_vector_stream mlx_vector_stream_new_value(const mlx_stream val)"
+  (val mlx-stream))
+
+(define-mlx-function ("mlx_vector_stream_set_data" mlx-vector-stream-set-data) :int
+  "C: int mlx_vector_stream_set_data( mlx_vector_stream* vec, const mlx_stream* data, size_t size)"
+  (vec :pointer)
+  (data :pointer)
+  (size :size))
+
+(define-mlx-function ("mlx_vector_stream_set_value" mlx-vector-stream-set-value) :int
+  "C: int mlx_vector_stream_set_value(mlx_vector_stream* vec, const mlx_stream val)"
+  (vec :pointer)
+  (val mlx-stream))
+
+(define-mlx-function ("mlx_vector_stream_append_data" mlx-vector-stream-append-data) :int
+  "C: int mlx_vector_stream_append_data( mlx_vector_stream vec, const mlx_stream* data, size_t size)"
+  (vec mlx-vector-stream)
+  (data :pointer)
+  (size :size))
+
+(define-mlx-function ("mlx_vector_stream_append_value" mlx-vector-stream-append-value) :int
+  "C: int mlx_vector_stream_append_value(mlx_vector_stream vec, const mlx_stream val)"
+  (vec mlx-vector-stream)
+  (val mlx-stream))
+
+(define-mlx-function ("mlx_vector_stream_size" mlx-vector-stream-size) :size
+  "C: size_t mlx_vector_stream_size(mlx_vector_stream vec)"
+  (vec mlx-vector-stream))
+
+(define-mlx-function ("mlx_vector_stream_get" mlx-vector-stream-get) :int
+  "C: int mlx_vector_stream_get( mlx_stream* res, const mlx_vector_stream vec, size_t idx)"
+  (res :pointer)
+  (vec mlx-vector-stream)
+  (idx :size))
+
 ;;; ------------------------------------------------------------------
 ;;; version.h
 
@@ -4515,6 +4926,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-closure-custom
             mlx-closure-custom-jvp
             mlx-closure-custom-vmap
+            mlx-compile-cache
             mlx-device
             mlx-device-info
             mlx-distributed-group
@@ -4531,11 +4943,13 @@ C: int mlx_string_free(mlx_string str)"
             mlx-map-string-to-array
             mlx-map-string-to-string
             mlx-stream
+            mlx-stream-thread-local
             mlx-string
             mlx-vector-array
             mlx-vector-vector-array
             mlx-vector-int
             mlx-vector-string
+            mlx-vector-stream
             mlx-map-string-to-array-iterator
             mlx-map-string-to-string-iterator
             mlx-optional-int
@@ -4648,8 +5062,11 @@ C: int mlx_string_free(mlx_string str)"
             mlx-closure-custom-vmap-new-func-payload
             mlx-closure-custom-vmap-set
             mlx-closure-custom-vmap-apply
+            mlx-compile-cache-new
+            mlx-compile-cache-free
             mlx-compile
             mlx-detail-compile
+            mlx-detail-compile-cache
             mlx-detail-compile-clear-cache
             mlx-detail-compile-erase
             mlx-disable-compile
@@ -4687,8 +5104,10 @@ C: int mlx_string_free(mlx_string str)"
             mlx-distributed-group-new
             mlx-distributed-group-free
             mlx-distributed-init
-            mlx-distributed-group-rank
-            mlx-distributed-group-size
+            mlx-distributed-init-with-all-gather
+            mlx-distributed-clear-backends
+            mlx-distributed-group-get-rank
+            mlx-distributed-group-get-size
             mlx-distributed-group-split
             mlx-distributed-is-available
             mlx-set-error-handler
@@ -4702,6 +5121,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-imported-function-free
             mlx-imported-function-apply
             mlx-imported-function-apply-kwargs
+            mlx-fast-cross-entropy
             mlx-fast-cuda-kernel-config-new
             mlx-fast-cuda-kernel-config-free
             mlx-fast-cuda-kernel-config-add-output-arg
@@ -4715,6 +5135,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-fast-cuda-kernel-new
             mlx-fast-cuda-kernel-free
             mlx-fast-cuda-kernel-apply
+            mlx-fast-gated-delta-update
             mlx-fast-layer-norm
             mlx-fast-metal-kernel-config-new
             mlx-fast-metal-kernel-config-free
@@ -4790,6 +5211,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-linalg-cholesky
             mlx-linalg-cholesky-inv
             mlx-linalg-cross
+            mlx-linalg-det
             mlx-linalg-eig
             mlx-linalg-eigh
             mlx-linalg-eigvals
@@ -4802,6 +5224,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-linalg-norm-l2
             mlx-linalg-pinv
             mlx-linalg-qr
+            mlx-linalg-slogdet
             mlx-linalg-solve
             mlx-linalg-solve-triangular
             mlx-linalg-svd
@@ -4824,6 +5247,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-map-string-to-string-iterator-next
             mlx-clear-cache
             mlx-get-active-memory
+            mlx-get-array-buffer-size
             mlx-get-cache-memory
             mlx-get-memory-limit
             mlx-get-peak-memory
@@ -4831,7 +5255,9 @@ C: int mlx_string_free(mlx_string str)"
             mlx-set-cache-limit
             mlx-set-memory-limit
             mlx-set-wired-limit
+            mlx-metal-get-metallib-path
             mlx-metal-is-available
+            mlx-metal-set-metallib-path
             mlx-metal-start-capture
             mlx-metal-stop-capture
             mlx-abs
@@ -4891,15 +5317,23 @@ C: int mlx_string_free(mlx_string str)"
             mlx-copy
             mlx-cos
             mlx-cosh
+            mlx-count-nonzero-axis
+            mlx-count-nonzero-axes
+            mlx-count-nonzero
+            mlx-cummax-axis
             mlx-cummax
+            mlx-cummin-axis
             mlx-cummin
+            mlx-cumprod-axis
             mlx-cumprod
+            mlx-cumsum-axis
             mlx-cumsum
             mlx-degrees
             mlx-depends
             mlx-dequantize
             mlx-diag
             mlx-diagonal
+            mlx-diff
             mlx-divide
             mlx-divmod
             mlx-einsum
@@ -4912,6 +5346,9 @@ C: int mlx_string_free(mlx_string str)"
             mlx-expm1
             mlx-eye
             mlx-flatten
+            mlx-flip-axes
+            mlx-flip-axis
+            mlx-flip
             mlx-floor
             mlx-floor-divide
             mlx-from-fp8
@@ -4921,6 +5358,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-gather-single
             mlx-gather-mm
             mlx-gather-qmm
+            mlx-gather-qqmm
             mlx-greater
             mlx-greater-equal
             mlx-hadamard-transform
@@ -4939,21 +5377,25 @@ C: int mlx_string_free(mlx_string str)"
             mlx-left-shift
             mlx-less
             mlx-less-equal
+            mlx-linspace-endpoint
             mlx-linspace
             mlx-log
             mlx-log10
             mlx-log1p
             mlx-log2
             mlx-logaddexp
+            mlx-logcumsumexp-axis
             mlx-logcumsumexp
             mlx-logical-and
             mlx-logical-not
             mlx-logical-or
+            mlx-logical-xor
             mlx-logsumexp-axes
             mlx-logsumexp-axis
             mlx-logsumexp
             mlx-masked-scatter
             mlx-matmul
+            mlx-matrix-transpose
             mlx-max-axes
             mlx-max-axis
             mlx-max
@@ -4961,6 +5403,8 @@ C: int mlx_string_free(mlx_string str)"
             mlx-mean-axes
             mlx-mean-axis
             mlx-mean
+            mlx-median-axes
+            mlx-median-axis
             mlx-median
             mlx-meshgrid
             mlx-min-axes
@@ -4974,12 +5418,14 @@ C: int mlx_string_free(mlx_string str)"
             mlx-not-equal
             mlx-number-of-elements
             mlx-ones
+            mlx-ones-like-dtype
             mlx-ones-like
             mlx-outer
             mlx-pad
             mlx-pad-symmetric
             mlx-partition-axis
             mlx-partition
+            mlx-positive
             mlx-power
             mlx-prod-axes
             mlx-prod-axis
@@ -5012,6 +5458,7 @@ C: int mlx_string_free(mlx_string str)"
             mlx-scatter-min-single
             mlx-scatter-prod
             mlx-scatter-prod-single
+            mlx-searchsorted
             mlx-segmented-mm
             mlx-sigmoid
             mlx-sign
@@ -5059,19 +5506,26 @@ C: int mlx_string_free(mlx_string str)"
             mlx-to-fp8
             mlx-topk-axis
             mlx-topk
+            mlx-trace-axes
             mlx-trace
             mlx-transpose-axes
             mlx-transpose
             mlx-tri
             mlx-tril
             mlx-triu
+            mlx-trunc
             mlx-unflatten
+            mlx-unique
+            mlx-unstack-axis
+            mlx-unstack
             mlx-var-axes
             mlx-var-axis
             mlx-var
+            mlx-vecdot
             mlx-view
             mlx-where
             mlx-zeros
+            mlx-zeros-like-dtype
             mlx-zeros-like
             mlx-random-bernoulli
             mlx-random-bits
@@ -5094,6 +5548,12 @@ C: int mlx_string_free(mlx_string str)"
             mlx-random-uniform
             mlx-stream-new
             mlx-stream-new-device
+            mlx-stream-new-thread-unsafe
+            mlx-stream-thread-local-new
+            mlx-stream-thread-local-set
+            mlx-stream-thread-local-free
+            mlx-stream-from-thread-local
+            mlx-get-streams
             mlx-stream-set
             mlx-stream-free
             mlx-stream-tostring
@@ -5101,6 +5561,9 @@ C: int mlx_string_free(mlx_string str)"
             mlx-stream-get-device
             mlx-stream-get-index
             mlx-synchronize
+            mlx-synchronize-default
+            mlx-synchronize-thread-local
+            mlx-clear-streams
             mlx-get-default-stream
             mlx-set-default-stream
             mlx-default-cpu-stream-new
@@ -5164,4 +5627,15 @@ C: int mlx_string_free(mlx_string str)"
             mlx-vector-string-append-value
             mlx-vector-string-size
             mlx-vector-string-get
+            mlx-vector-stream-new
+            mlx-vector-stream-set
+            mlx-vector-stream-free
+            mlx-vector-stream-new-data
+            mlx-vector-stream-new-value
+            mlx-vector-stream-set-data
+            mlx-vector-stream-set-value
+            mlx-vector-stream-append-data
+            mlx-vector-stream-append-value
+            mlx-vector-stream-size
+            mlx-vector-stream-get
             mlx-version)))

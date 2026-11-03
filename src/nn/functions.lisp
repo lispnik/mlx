@@ -98,11 +98,23 @@ BODY computes it; it is compiled when every key has its default value."
 (defun weighted (loss weights)
   (if weights (mx:multiply loss weights) loss))
 
-(defun nn:cross-entropy (logits targets &key weights (axis -1) (label-smoothing 0.0) (reduction :none))
+(defun nn:cross-entropy (logits targets &key weights (axis -1) (label-smoothing 0.0) (reduction :none)
+                                            fused)
   "Cross entropy between unnormalized LOGITS and TARGETS, which are class
-indices (one dimension less than LOGITS) or probabilities (same shape)."
-  (let* ((targets (mx:ensure-array targets))
-         (probabilities-p (= (mx:ndim targets) (mx:ndim logits)))
+indices (one dimension less than LOGITS) or probabilities (same shape).
+FUSED uses MLX's fused kernel when it applies (class indices, the last
+axis, no label smoothing): about 30% faster at a large vocabulary, but
+with a higher memory peak, and a float32 loss for bfloat16 LOGITS."
+  (let ((targets (mx:ensure-array targets)))
+    (if (and fused
+             (< (mx:ndim targets) (mx:ndim logits))
+             (member axis (list -1 (1- (mx:ndim logits))))
+             (zerop label-smoothing))
+        (reduce-loss (weighted (fast:cross-entropy logits targets) weights) reduction)
+        (composed-cross-entropy logits targets weights axis label-smoothing reduction))))
+
+(defun composed-cross-entropy (logits targets weights axis label-smoothing reduction)
+  (let* ((probabilities-p (= (mx:ndim targets) (mx:ndim logits)))
          (score (if probabilities-p
                     (mx:sum (mx:multiply logits targets) :axis axis)
                     (mx:squeeze (mx:take-along-axis logits (mx:expand-dims targets -1) axis)

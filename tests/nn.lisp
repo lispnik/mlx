@@ -112,7 +112,14 @@
       (check "cosine" (nn:cosine-similarity-loss logits probs))
       (check "hinge" (nn:hinge-loss p (mx:from-lisp '(1.0 -1.0 1.0)))))
     (is (close-to (nn:cross-entropy logits targets :reduction :mean) (/ (+ 0.241311 0.109601) 2) 1e-4))
-    (is (close-to (nn:cross-entropy logits targets :reduction :sum) (+ 0.241311 0.109601) 1e-4))))
+    (is (close-to (nn:cross-entropy logits targets :reduction :sum) (+ 0.241311 0.109601) 1e-4))
+    ;; the fused kernel agrees, and the cases it can't do fall back
+    (is (close-to (nn:cross-entropy logits targets :fused t) (lisp (nn:cross-entropy logits targets))))
+    (is (close-to (nn:cross-entropy logits targets :fused t :weights (mx:from-lisp '(2.0 0.5)) :reduction :sum)
+                  (+ (* 2 0.241311) (* 0.5 0.109601))))
+    (is (close-to (nn:cross-entropy logits probs :fused t) (lisp (nn:cross-entropy logits probs))))
+    (is (close-to (nn:cross-entropy logits targets :fused t :label-smoothing 0.1)
+                  (lisp (nn:cross-entropy logits targets :label-smoothing 0.1))))))
 
 (test optimizers-match-python-mlx
   (loop for (name make) in `(("sgd" ,(lambda () (optim:sgd 0.1)))

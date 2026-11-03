@@ -160,8 +160,8 @@ notice gigabytes of them."
                       (mx:concatenate (list (mx:ref old-k t t (list 0 prev)) new-k) :axis 2)
                       (kv-cache-values cache)
                       (mx:concatenate (list (mx:ref old-v t t (list 0 prev)) new-v) :axis 2))
-                ;; the grown copies replace these; don't wait for the GC
-                (mx:eval (kv-cache-keys cache) (kv-cache-values cache))
+                ;; the grown copies replace these; don't wait for the GC.  Freeing
+                ;; drops only our handles: the pending concatenation keeps its own
                 (mx:free old-k)
                 (mx:free old-v))
               (setf (kv-cache-keys cache) new-k

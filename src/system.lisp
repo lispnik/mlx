@@ -16,6 +16,13 @@
 (defun mlx:reset-peak-memory () (check (ffi:mlx-reset-peak-memory)) nil)
 (defun mlx:clear-cache () "Release cached, unused memory." (check (ffi:mlx-clear-cache)) nil)
 
+(defun mlx:array-buffer-size (arrays)
+  "Bytes of the buffers behind ARRAYS (a list, or one array), each buffer
+counted once and at its allocated size, which can exceed the arrays'
+logical size.  The arrays must be evaluated."
+  (with-vector-array (v arrays)
+    (size-query ffi:mlx-get-array-buffer-size v)))
+
 (defun mlx:set-memory-limit (bytes)
   "Set the memory limit; returns the previous limit."
   (size-query ffi:mlx-set-memory-limit bytes))

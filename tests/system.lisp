@@ -50,6 +50,9 @@
   (let ((a (mx:eval (mx:ones '(1024 1024)))))
     (is (>= (mx:active-memory) (* 4 1024 1024)))
     (is (>= (mx:peak-memory) (* 4 1024 1024)))
+    ;; a shared buffer counts once
+    (is (>= (mx:array-buffer-size a) (* 4 1024 1024)))
+    (is (= (mx:array-buffer-size a) (mx:array-buffer-size (list a a))))
     (mx:free a))
   (is (integerp (mx:cache-memory)))
   (is (integerp (mx:memory-limit)))

@@ -78,6 +78,7 @@ with CL (MAX, SUM, EVAL, LOAD, COMPILE...).  Use a package-local nickname.")
      '#:start-metal-capture '#:stop-metal-capture
      '#:active-memory '#:cache-memory '#:peak-memory '#:reset-peak-memory
      '#:memory-limit '#:set-memory-limit '#:set-cache-limit '#:set-wired-limit '#:clear-cache
+     '#:array-buffer-size
      '#:export-to-dot '#:print-graph
      ;; syntax
      '#:+ '#:- '#:* '#:/ '#:@ '#:< '#:> '#:<= '#:>= '#:= '#:/=

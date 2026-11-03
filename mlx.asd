@@ -4,7 +4,7 @@
   :description "Comprehensive Common Lisp bindings to Apple MLX via mlx-c."
   :author "mkennedy"
   :license "MIT"
-  :version "0.1.0"
+  :version "0.2.0"
   :depends-on ("cffi" "trivial-garbage" "uiop")
   :pathname "src/"
   :serial t

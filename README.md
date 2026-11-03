@@ -34,7 +34,9 @@ are in [`examples/`](examples/).
 ## Requirements
 
 - Apple Silicon Mac (the bindings rely on the arm64 calling convention; see below)
-- `brew install mlx-c` (tested with mlx-c 0.6 / MLX 0.32)
+- `brew install mlx-c`: mlx-c 0.8 (tested with mlx-c 0.8.0 / MLX 0.32.4). The
+  bindings are generated from its headers and its C API changed in 0.8, so
+  for mlx-c 0.6 or 0.7 use the `v0.1.0` tag.
 - SBCL and [ocicl](https://github.com/ocicl/ocicl)
 
 ```sh
@@ -88,11 +90,11 @@ Two guards protect against mlx-c changes:
 | `mlx.linalg` | `mlx.core.linalg` | `inv` `solve` `qr` `svd` `eigh` `cholesky` `norm` |
 | `mlx.fft` | `mlx.core.fft` | `fft` `rfft` `fft2` `fftn` `irfftn` `fftshift` |
 | `mlx.random` | `mlx.core.random` | `seed` `key` `split` `normal` `uniform` `randint` `categorical` |
-| `mlx.fast` | `mlx.core.fast` | `rms-norm` `layer-norm` `rope` `scaled-dot-product-attention` `metal-kernel` |
+| `mlx.fast` | `mlx.core.fast` | `rms-norm` `layer-norm` `rope` `scaled-dot-product-attention` `cross-entropy` `metal-kernel` |
 | `mlx.distributed` | `mlx.core.distributed` | `init` `all-sum` `all-gather` `send` `recv` |
 | `mlx.nn` | `mlx.nn` | `module` `linear` `conv2d` `multi-head-attention` `cross-entropy` `value-and-grad` |
 | `mlx.optimizers` | `mlx.optimizers` | `adam` `adamw` `sgd` `cosine-decay` `clip-grad-norm` |
-| `mlx.llm` (system `mlx/llm`) | `mlx-lm` | `load-model` `generate` `encode` `apply-chat-template` |
+| `mlx.llm` (system `mlx/llm`) | `mlx-lm` | `load-model` `generate` `encode` `apply-chat-template` `lora-train` |
 | `mlx.symreg` (system `mlx/symreg`) | (PySR, in spirit) | `symbolic-regression` `expression-function` `expression->mlx` |
 | `mlx-ffi` | the C API, 1:1 | `mlx-array-new-data` `mlx-add` ... |
 
@@ -184,9 +186,17 @@ Python, C++ and Swift.
              :output-shapes (list (mx:shape x)) :output-dtypes '(:float32)))
 ```
 
+**Axis arguments.** Where MLX has separate whole-array, one-axis and
+several-axes variants, one function dispatches on its axis argument: `nil`
+means the whole (flattened) array, an integer one axis, a list several.
+For example `(mx:sum a)`, `(mx:sum a :axis 0)`, `(mx:flip a :axis '(0 1))`
+and `(mx:cumsum a -1)`. The variants stay available too (`sum-axis`,
+`flip-axes`, ...).
+
 **Also included:** memory statistics and limits (`active-memory`,
-`set-cache-limit`, ...), `export-to-dot` / `print-graph`, Metal capture,
-compile modes, distributed groups, and device info.
+`array-buffer-size`, `set-cache-limit`, ...), `export-to-dot` /
+`print-graph`, Metal capture, compile modes, distributed groups, and device
+info.
 
 ## Neural networks
 
@@ -497,6 +507,37 @@ Harder exercises can exhaust the attempts on logic errors. The 3B model is
 noticeably weaker at Lisp; its output matches mlx-lm's, so the model is the
 limit, not the implementation.
 
+### Fine-tuning with LoRA
+
+`lora-train` adds low-rank adapters to the attention and MLP projections of
+a model's last layers, freezes everything else, and trains the adapters on
+chat examples. With 4-bit weights this is QLoRA. The adapters are saved
+apart from the model, named as in mlx-lm, and can be loaded into a fresh
+copy:
+
+```lisp
+(let* ((model (mlx.llm:load-model "mlx-community/Qwen2.5-0.5B-Instruct-4bit"))
+       (tokenizer (mlx.llm:model-tokenizer model))
+       (examples (list (mlx.llm:chat-example tokenizer '(("user" . "Reverse a list in Lisp."))
+                                             "(reverse list)"))))
+  (mlx.llm:lora-train model examples :iterations 300 :rank 8 :num-layers 16)
+  (mlx.llm:save-adapters model "adapters.safetensors"))   ; settings go to adapters.sexp
+
+(mlx.llm:load-adapters (mlx.llm:load-model "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+                       "adapters.safetensors")
+```
+
+`train/` uses this to distil the 7B Lisp writer into the 3B model: the 7B
+model solves the exercises in `train/lisp-train-tasks.sexp` with the repair
+loop, the conversations that passed their tests become training data, and
+the benchmark compares the 3B model with and without the adapters on
+exercises it never trained on. `train/pipeline.sh` runs the whole thing one
+heavy job at a time, and resumes where an interrupted run stopped.
+
+`nn:cross-entropy` takes `:fused t` to use MLX's fused kernel. At a 32k
+vocabulary it is about 30% faster, but its memory peak is higher (819 MB
+against 491 MB for a 4x128-token bf16 batch), so it is off by default.
+
 ### Completion in Emacs, from the live image
 
 `emacs/mlx-complete.el` completes Common Lisp at point in SLY or SLIME,
@@ -632,6 +673,11 @@ though, and GC can't see that pressure. In loops, free deterministically:
 `mx:free` releases a handle immediately. Using a freed handle signals a Lisp
 error; it never touches freed memory.
 
+**KV caches** outlive any one scope, so the generators free their own when
+they finish, including on an early exit from a callback. A cache you make
+with `mlx.llm:make-cache` and pass in is yours to release with
+`mlx.llm:free-cache`.
+
 **Threads.** MLX streams belong to the thread that creates them. Each
 thread gets its own default streams, so operations work from any thread
 (SLY and SLIME evaluate requests in threads of their own). A lazy array,
@@ -695,3 +741,7 @@ $ bin/mlx-cl symreg -f '(* x0 (sqrt x0))'                    # symbolic regressi
 - **Saved images.** `sb-ext:*init-hooks*` reinstalls the error handler and
   drops cached streams, so `bin/mlx-cl` starts cleanly.
 - The CUDA kernel API is bound in `mlx-ffi` only (no CUDA on macOS).
+
+## License
+
+MIT; see [LICENSE](LICENSE).

@@ -22,10 +22,23 @@ jobs:
           sbcl --version
           brew list --versions mlx-c
 
+      - name: Cache ocicl packages
+        uses: actions/cache@v4
+        with:
+          path: ocicl
+          key: ocicl-${{ hashFiles('ocicl.csv') }}
+
+      # Downloads from ghcr.io sometimes get "Connection reset by peer";
+      # ocicl install skips what it already has, so retrying resumes.
       - name: Set up ocicl and fetch dependencies
         run: |
           ocicl setup > ~/.sbclrc
-          ocicl install
+          for attempt in 1 2 3 4 5; do
+            ocicl install && exit 0
+            echo "ocicl install failed (attempt $attempt); retrying"
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - name: Generated bindings match the installed mlx-c headers
         run: make check-generated
